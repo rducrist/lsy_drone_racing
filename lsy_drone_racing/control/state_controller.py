@@ -18,22 +18,27 @@ class StateController(Controller):
         super().__init__(obs, info, config)
 
         self._freq = config.env.freq
-        self._t_total = 30.0
+        self._t_total = 15.0
 
         # initial observations
         self._pos = np.array(obs.get("pos"))
         self._quat = np.array(obs.get("quat"))
         self._vel = np.array(obs.get("vel", np.zeros(3)))
         self._gates_pos = np.array(obs.get("gates_pos"))
+        self._gates_visited = np.array(obs.get("gates_visited"))
         self._gates_orientation = np.array(obs.get("gates_quat"))
         self._obstacles_pos = np.array(obs.get("obstacles_pos", []))
+        self._last_target_gate = int(obs.get("target_gate", 0))
+
+
+        self._last_target_gate_idx = 0
 
         # copy for replanning
         self._last_known_gates = np.array(self._gates_pos)
         self._needs_replanning = False
 
         # PD gains
-        self._Kp = np.array([1.5, 1.5, 0.3])
+        self._Kp = np.array([1.5, 1.5, 1.0])
         self._Kd = np.array([0.4, 0.4, 0.1])
 
         self._prev_pos_error = np.zeros(3)
@@ -58,6 +63,26 @@ class StateController(Controller):
         self._yaw_current = np.array(R.from_quat(self._quat).as_euler("xyz", degrees=False)[2])
         self._update_trajectory()
 
+
+    # def _remove_passed_gate_waypoints(self, passed_gate_idx: int):
+    #     """Remove the approach, gate, and departure waypoints for a passed gate."""
+    #     if not hasattr(self, "_waypoints") or len(self._waypoints) == 0:
+    #         return
+
+    #     # Each gate adds exactly 3 waypoints (approach, gate center, departure)
+    #     start_idx = 1 + 3 * passed_gate_idx  # +1 because first waypoint is current position
+    #     end_idx = start_idx + 3
+
+    #     if start_idx < len(self._waypoints):
+    #         # Clip to array bounds in case we're near the end
+    #         end_idx = min(end_idx, len(self._waypoints))
+    #         self._waypoints = np.delete(self._waypoints, np.s_[start_idx:end_idx], axis=0)
+
+    #     # Also drop that gate from the known gates list (for replanning)
+    #     if hasattr(self, "_last_known_gates") and len(self._last_known_gates) > passed_gate_idx:
+    #         self._last_known_gates = np.delete(self._last_known_gates, passed_gate_idx, axis=0)
+    #         self._gates_orientation = np.delete(self._gates_orientation, passed_gate_idx, axis=0)
+    
     # -------------------------------------------------------------------------
     def _update_trajectory(self):
         """Rebuild cubic spline trajectory from current state and known gates."""
@@ -65,6 +90,7 @@ class StateController(Controller):
         curr_vel = np.array(self._vel_current, dtype=float)
         gates = np.array(self._last_known_gates, dtype=float)
         orientations = np.array(self._gates_orientation, dtype=float)
+        
 
         if gates.size == 0:
             self._spline_x = lambda u: curr_pos[0]
@@ -88,6 +114,9 @@ class StateController(Controller):
             waypoints += [approach, gate_pos, departure]
             yaw_points += [yaw, yaw, yaw]
 
+        waypoints.insert(-3, np.array([-1.0, -1.5, 1.0]))
+        yaw_points.insert(-3, yaw_points[-3])
+
         waypoints = np.array(waypoints)
         yaw_points = np.array(yaw_points)
 
@@ -100,7 +129,6 @@ class StateController(Controller):
         du_dt = 1.0 / total_length
         start_vel_u = curr_vel / du_dt  # convert to derivative wrt u
 
-        # ✅ Correct bc_type format
         bc_x = ((1, start_vel_u[0]), "natural")
         bc_y = ((1, start_vel_u[1]), "natural")
         bc_z = ((1, start_vel_u[2]), "natural")
@@ -141,6 +169,14 @@ class StateController(Controller):
         self._yaw_current = R.from_quat(quat_current).as_euler("xyz", degrees=False)[2]
         gates_pos = np.array(obs.get("gates_pos", self._last_known_gates))
 
+        self._target_gate = np.array(obs.get("target_gate"))
+
+        # if self._target_gate > self._last_target_gate:
+        #     self._remove_passed_gate_waypoints(self._last_target_gate)
+        #     self._last_target_gate = self._target_gate
+        #     self._needs_replanning = True
+        
+
         if not np.array_equal(gates_pos, self._last_known_gates):
             self._last_known_gates = gates_pos
             self._needs_replanning = True
@@ -148,6 +184,7 @@ class StateController(Controller):
         if self._needs_replanning:
             self._old_waypoints = np.array(self._waypoints).copy()
             self._update_trajectory()
+            breakpoint()
             self._tick=0.0
 
         t = min(self._tick / self._freq, self._t_total)
@@ -173,7 +210,6 @@ class StateController(Controller):
         dt = max(t - self._prev_time, 1e-6)
         d_error = (pos_error - self._prev_pos_error) / dt
         pos_correction = self._Kp * pos_error + self._Kd * d_error
-        print(pos_correction)
         # pos_correction = np.clip(pos_correction, -self._max_corr, self._max_corr)
 
         self._prev_pos_error = pos_error
