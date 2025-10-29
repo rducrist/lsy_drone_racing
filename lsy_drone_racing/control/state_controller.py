@@ -18,7 +18,7 @@ class StateController(Controller):
         super().__init__(obs, info, config)
 
         self._freq = config.env.freq
-        self._t_total = 10.0
+        self._t_total = 20.0
 
         # initial observations
         self._pos = np.array(obs.get("pos"))
@@ -45,6 +45,13 @@ class StateController(Controller):
         self._avoid_radius = 0.0
         self._avoid_gain = 0.0
         self._max_corr = np.array([1.0, 1.0, 1.0])
+
+        self.SAFE_WAYPOINTS = np.array([
+            [0.0,  0.25, 1.00],   # around obstacle 1 (0.0, 0.75) → below/right path
+            [ 1.4, 0.25, 1.00],   # around obstacle 2 (1.0, 0.25) → slightly under/right
+            [-0.25, -0.25, 1.00],   # around obstacle 3 (-1.5, -0.25) → left/rear side
+            [-0.5, -1.50, 1.00],   # around obstacle 4 (-0.5, -0.75) → below/left
+        ])
 
         # bookkeeping
         self._tick = 0
@@ -82,6 +89,7 @@ class StateController(Controller):
         APPROACH_DIST = 0.1
         waypoints = [curr_pos]
         yaw_points = [self._yaw_current]
+        
 
         for i in range(self._target_gate, len(gates)):
             gate_pos = gates[i]
@@ -92,12 +100,12 @@ class StateController(Controller):
             approach = gate_pos - APPROACH_DIST * direction
             departure = gate_pos + APPROACH_DIST * direction
 
-            waypoints += [approach, gate_pos, departure]
-            yaw_points += [yaw, yaw, yaw]
+            waypoints += [self.SAFE_WAYPOINTS[i], approach, gate_pos, departure]
+            yaw_points += [yaw, yaw, yaw, yaw]
 
-        if len(waypoints) > 4 and self._target_gate < len(gates) -1:
-            waypoints.insert(-3, np.array([-1.0, -1.5, 1.0]))
-            yaw_points.insert(-3, yaw_points[-3])
+        # if len(waypoints) > 3 and self._target_gate < len(gates) -1:
+        #     waypoints.insert(-3, np.array([-1.0, -1.5, 1.0]))
+        #     yaw_points.insert(-3, yaw_points[-3])
 
         
         waypoints = np.array(waypoints)
@@ -162,8 +170,10 @@ class StateController(Controller):
         if self._needs_replanning:
             self._old_waypoints = np.array(self._waypoints).copy()
             self._update_trajectory()
-            self._tick=0.0
+            # breakpoint()
+            self._tick=0.0 # needs to be resetted
 
+        # min (elapsed time und total time)
         t = min(self._tick / self._freq, self._t_total)
         u = np.clip(t / self._t_total, 0.0, 1.0)
 
