@@ -11,6 +11,64 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+#HILFSFUNKTIONEN FÜR XY OBSTACLE AVOIDANCE PRE-PLANNING
+def _segment_circle_distance_xy(p0, p1, c, r):
+    p0 = np.asarray(p0); p1 = np.asarray(p1); c = np.asarray(c)
+    d  = p1[:2] - p0[:2]
+    if np.allclose(d, 0):
+        return np.linalg.norm(p0[:2] - c[:2]), 0.0
+    t  = np.clip(np.dot(c[:2]-p0[:2], d)/np.dot(d,d), 0.0, 1.0)
+    proj = p0[:2] + t * d
+    dist = np.linalg.norm(proj - c[:2])
+    return dist, t
+
+def _choose_bypass_point_xy(p0, p1, c, clearance):
+    p0 = np.asarray(p0); p1 = np.asarray(p1); c = np.asarray(c)
+    d  = p1[:2] - p0[:2]
+    nrm = np.linalg.norm(d)
+    d  = d / (nrm + 1e-9) if nrm > 1e-9 else np.array([1.0, 0.0])
+    _, t = _segment_circle_distance_xy(p0, p1, c, clearance)
+    proj = p0[:2] + t * (p1[:2]-p0[:2])
+    n    = proj - c[:2]
+    if np.linalg.norm(n) < 1e-9:
+        n = np.array([-d[1], d[0]])
+    n  = n / (np.linalg.norm(n)+1e-9)
+    cand = [c[:2] + n*clearance, c[:2] - n*clearance]
+    def total_turn_cost(q):
+        v0 = q - p0[:2]; v1 = p1[:2] - q
+        v0/= (np.linalg.norm(v0)+1e-9); v1/= (np.linalg.norm(v1)+1e-9)
+        ref = (p1[:2]-p0[:2])/(np.linalg.norm(p1[:2]-p0[:2])+1e-9)
+        return (1 - np.dot(v0, ref)) + (1 - np.dot(ref, v1))
+    q  = cand[0] if total_turn_cost(cand[0]) <= total_turn_cost(cand[1]) else cand[1]
+    # Z linear zwischen p0 und p1 (sanft)
+    z  = (1.0 - t) * p0[2] + t * p1[2]
+    return np.array([q[0], q[1], z])
+
+def _insert_obstacle_bypasses(waypoints, obstacles, clearance, max_passes=2):
+    if obstacles is None or len(obstacles) == 0:
+        return waypoints
+    for _ in range(max_passes):
+        changed = False
+        new_wps = [waypoints[0]]
+        for i in range(len(waypoints)-1):
+            p0, p1 = waypoints[i], waypoints[i+1]
+            need = False; bypass = None
+            for obs in obstacles:
+                dist, _ = _segment_circle_distance_xy(p0, p1, obs, clearance)
+                if dist < clearance:
+                    bypass = _choose_bypass_point_xy(p0, p1, obs, clearance)
+                    need = True
+                    break
+            if need and bypass is not None:
+                new_wps.append(bypass); new_wps.append(p1); changed = True
+            else:
+                new_wps.append(p1)
+        waypoints = np.array(new_wps)
+        if not changed:
+            break
+    return waypoints
+# -------------------------------------------------------------------------
+
 class StateController(Controller):
     """State controller with dynamic trajectory replanning and velocity-matched cubic splines."""
 
@@ -27,8 +85,23 @@ class StateController(Controller):
         self._gates_pos = np.array(obs.get("gates_pos"))
         self._gates_visited = np.array(obs.get("gates_visited"))
         self._gates_orientation = np.array(obs.get("gates_quat"))
-        self._obstacles_pos = np.array(obs.get("obstacles_pos", []))
         self._target_gate = int(obs.get("target_gate", 0))
+
+        # --- Obstacle model (vertical cylinders), plan in XY ---
+        self._drone_radius   = 0.15   # m (Prop-Scheibe + Tracking-Toleranz)
+        self._obs_radius     = 0.08   # m (Falls bekannt anpassen)
+        self._safety_margin  = 0.10   # m
+        self._clearance      = self._drone_radius + self._obs_radius + self._safety_margin  # ~0.33 m
+
+        # Sanfte, optionale Repulsion (nur als Fallback)
+        self._avoid_radius   = 0.6
+        self._avoid_gain     = 0.3
+        self._max_corr       = np.array([0.6, 0.6, 0.4])
+
+        self._obstacles_pos = np.array(obs.get("obstacles_pos", []))
+        # statische Kopie für die Planung:
+        self._obstacles_pos0 = np.array(self._obstacles_pos) if self._obstacles_pos is not None else np.empty((0,3))
+
 
         # copy for replanning
         self._last_known_gates = np.array(self._gates_pos)
@@ -62,6 +135,7 @@ class StateController(Controller):
 
     
     # -------------------------------------------------------------------------
+    #-------------------------------------------------------------------------
     def _update_trajectory(self):
         """Rebuild cubic spline trajectory from current state and known gates."""
         curr_pos = np.array(self._pos_current, dtype=float)
@@ -100,8 +174,20 @@ class StateController(Controller):
             yaw_points.insert(-3, yaw_points[-3])
 
         
-        waypoints = np.array(waypoints)
-        yaw_points = np.array(yaw_points)
+        # waypoints = np.array(waypoints)
+        # yaw_points = np.array(yaw_points)
+
+        #NEU 
+        waypoints = _insert_obstacle_bypasses(
+            waypoints=waypoints,
+            obstacles=self._obstacles_pos0,
+            clearance=self._clearance,
+            max_passes=2,
+        )
+        # yaw_points angleichen
+        yaw_idx_src = np.linspace(0.0, 1.0, num=len(yaw_points))
+        yaw_idx_dst = np.linspace(0.0, 1.0, num=len(waypoints))
+        yaw_points  = np.interp(yaw_idx_dst, yaw_idx_src, yaw_points)
 
         seg_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
         cum_lengths = np.concatenate(([0.0], np.cumsum(seg_lengths)))
@@ -301,4 +387,3 @@ class StateController(Controller):
 
         plt.tight_layout()
         plt.show()
-
