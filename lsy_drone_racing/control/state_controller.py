@@ -46,12 +46,14 @@ class StateController(Controller):
         self._avoid_gain = 0.0
         self._max_corr = np.array([1.0, 1.0, 1.0])
 
-        self.SAFE_WAYPOINTS = np.array([
-            [0.0,  0.25, 1.00],   # around obstacle 1 (0.0, 0.75) → below/right path
-            [ 1.4, 0.25, 1.00],   # around obstacle 2 (1.0, 0.25) → slightly under/right
-            [-0.25, -0.25, 1.00],   # around obstacle 3 (-1.5, -0.25) → left/rear side
-            [-0.5, -1.50, 1.00],   # around obstacle 4 (-0.5, -0.75) → below/left
-        ])
+        self.SAFE_WAYPOINTS = np.array(
+            [
+                [0.0, 0.25, 0.50],  # around obstacle 1 (0.0, 0.75) → below/right path
+                [1.4, 0.25, 1.00],  # around obstacle 2 (1.0, 0.25) → slightly under/right
+                [-0.25, -0.15, 1.00],  # around obstacle 3 (-1.5, -0.25) → left/rear side
+                [-0.5, -1.30, 1.00],  # around obstacle 4 (-0.5, -0.75) → below/left
+            ]
+        )
 
         # bookkeeping
         self._tick = 0
@@ -60,14 +62,12 @@ class StateController(Controller):
         self._planned_trajectories: list[np.ndarray] = []  # store planned splines for visualization
         self._updated_gates_history: list[np.ndarray] = []  # store gate positions at each replan
 
-
         # build initial trajectory
         self._pos_current = np.array(self._pos)
         self._vel_current = np.array(self._vel)
         self._yaw_current = np.array(R.from_quat(self._quat).as_euler("xyz", degrees=False)[2])
         self._update_trajectory()
 
-    
     # -------------------------------------------------------------------------
     def _update_trajectory(self):
         """Rebuild cubic spline trajectory from current state and known gates."""
@@ -75,7 +75,6 @@ class StateController(Controller):
         curr_vel = np.array(self._vel_current, dtype=float)
         gates = np.array(self._last_known_gates, dtype=float)
         orientations = np.array(self._gates_orientation, dtype=float)
-        
 
         if gates.size == 0:
             self._spline_x = lambda u: curr_pos[0]
@@ -86,10 +85,9 @@ class StateController(Controller):
             self._needs_replanning = False
             return
 
-        APPROACH_DIST = 0.1
+        APPROACH_DIST = 0.2
         waypoints = [curr_pos]
         yaw_points = [self._yaw_current]
-        
 
         for i in range(self._target_gate, len(gates)):
             gate_pos = gates[i]
@@ -107,14 +105,23 @@ class StateController(Controller):
         #     waypoints.insert(-3, np.array([-1.0, -1.5, 1.0]))
         #     yaw_points.insert(-3, yaw_points[-3])
 
-        
+        waypoints += [[-1.0, 0.0, 1.2]]
+        yaw_points += [0]
         waypoints = np.array(waypoints)
+
         yaw_points = np.array(yaw_points)
 
+        # --- compute cumulative segment lengths ---
         seg_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
         cum_lengths = np.concatenate(([0.0], np.cumsum(seg_lengths)))
         total_length = cum_lengths[-1] if cum_lengths[-1] > 0 else 1.0
+        self._total_length = total_length
         u_way = cum_lengths / total_length
+
+        # --- adaptive total time ---
+        # keep same average speed as original t_total
+        avg_speed = total_length / self._t_total if hasattr(self, "_t_total") else 1.0
+        self._t_total = total_length / avg_speed
 
         # --- Enforce velocity at start ---
         du_dt = 1.0 / total_length
@@ -139,11 +146,10 @@ class StateController(Controller):
 
         num_samples = 200
         u_samples = np.linspace(0, 1, num_samples)
-        traj = np.stack([
-            self._spline_x(u_samples),
-            self._spline_y(u_samples),
-            self._spline_z(u_samples)
-        ], axis=1)
+        traj = np.stack(
+            [self._spline_x(u_samples), self._spline_y(u_samples), self._spline_z(u_samples)],
+            axis=1,
+        )
         self._planned_trajectories.append(traj)
 
         # store gates snapshot at this replan
@@ -161,7 +167,6 @@ class StateController(Controller):
         gates_pos = np.array(obs.get("gates_pos", self._last_known_gates))
 
         self._target_gate = np.array(obs.get("target_gate"))
-        
 
         if not np.array_equal(gates_pos, self._last_known_gates):
             self._last_known_gates = gates_pos
@@ -171,14 +176,15 @@ class StateController(Controller):
             self._old_waypoints = np.array(self._waypoints).copy()
             self._update_trajectory()
             # breakpoint()
-            self._tick=0.0 # needs to be resetted
+            self._tick = 0.0  # needs to be resetted
 
         # min (elapsed time und total time)
+
         t = min(self._tick / self._freq, self._t_total)
         u = np.clip(t / self._t_total, 0.0, 1.0)
 
         des_pos = np.array([self._spline_x(u), self._spline_y(u), self._spline_z(u)])
-        
+
         des_yaw = float(self._spline_yaw(u))
 
         pos_error = des_pos - self._pos_current
@@ -239,58 +245,120 @@ class StateController(Controller):
         if hasattr(self, "_planned_trajectories") and len(self._planned_trajectories) > 0:
             for i, traj in enumerate(self._planned_trajectories):
                 alpha = 0.3 + 0.7 * (i + 1) / len(self._planned_trajectories)
-                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
-                        linestyle="--", alpha=alpha, label=f"Trajectory {i+1}")
+                ax.plot(
+                    traj[:, 0],
+                    traj[:, 1],
+                    traj[:, 2],
+                    linestyle="--",
+                    alpha=alpha,
+                    label=f"Trajectory {i + 1}",
+                )
             # highlight latest
             traj = self._planned_trajectories[-1]
-            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
-                    color="blue", linewidth=2.0, label="Latest Planned Trajectory")
+            ax.plot(
+                traj[:, 0],
+                traj[:, 1],
+                traj[:, 2],
+                color="blue",
+                linewidth=2.0,
+                label="Latest Planned Trajectory",
+            )
 
         # --- Plot updated gate positions history ---
         if hasattr(self, "_updated_gates_history") and len(self._updated_gates_history) > 0:
             for i, gates in enumerate(self._updated_gates_history):
-                ax.scatter(gates[:, 0], gates[:, 1], gates[:, 2],
-                        color="deepskyblue", s=60, marker="^", alpha=0.6,
-                        label=f"Updated Gates #{i+1}" if i == len(self._updated_gates_history) - 1 else None)
+                ax.scatter(
+                    gates[:, 0],
+                    gates[:, 1],
+                    gates[:, 2],
+                    color="deepskyblue",
+                    s=60,
+                    marker="^",
+                    alpha=0.6,
+                    label=f"Updated Gates #{i + 1}"
+                    if i == len(self._updated_gates_history) - 1
+                    else None,
+                )
             # latest gate update in darker color
             latest_gates = self._updated_gates_history[-1]
-            ax.scatter(latest_gates[:, 0], latest_gates[:, 1], latest_gates[:, 2],
-                    color="blue", s=90, marker="^", label="Latest Gates")
+            ax.scatter(
+                latest_gates[:, 0],
+                latest_gates[:, 1],
+                latest_gates[:, 2],
+                color="blue",
+                s=90,
+                marker="^",
+                label="Latest Gates",
+            )
 
         # --- Plot original (initial) gates ---
         if hasattr(self, "_gates_pos") and self._gates_pos is not None:
             gates = np.array(self._gates_pos)
             if gates.size:
-                ax.scatter(gates[:, 0], gates[:, 1], gates[:, 2],
-                        color="red", s=80, marker="*", label="Initial Gates")
+                ax.scatter(
+                    gates[:, 0],
+                    gates[:, 1],
+                    gates[:, 2],
+                    color="red",
+                    s=80,
+                    marker="*",
+                    label="Initial Gates",
+                )
 
         # --- Plot actual path ---
         if self._actual_positions:
             actual_positions = np.vstack(self._actual_positions)
-            ax.plot(actual_positions[:, 0], actual_positions[:, 1], actual_positions[:, 2],
-                    color="green", linewidth=1.5, label="Actual Drone Path")
+            ax.plot(
+                actual_positions[:, 0],
+                actual_positions[:, 1],
+                actual_positions[:, 2],
+                color="green",
+                linewidth=1.5,
+                label="Actual Drone Path",
+            )
 
         # --- Plot latest waypoints ---
         if hasattr(self, "_waypoints") and len(self._waypoints) > 0:
             wps = np.array(self._waypoints)
-            ax.scatter(wps[:, 0], wps[:, 1], wps[:, 2],
-                    color="orange", s=40, marker="o", label="Latest Waypoints")
+            ax.scatter(
+                wps[:, 0],
+                wps[:, 1],
+                wps[:, 2],
+                color="orange",
+                s=40,
+                marker="o",
+                label="Latest Waypoints",
+            )
             for i, p in enumerate(wps):
                 ax.text(p[0], p[1], p[2], f"{i}", color="orange", fontsize=7)
 
         # --- Plot initial (old) waypoints ---
         if hasattr(self, "_old_waypoints") and len(self._old_waypoints) > 0:
             old_wps = np.array(self._old_waypoints)
-            ax.scatter(old_wps[:, 0], old_wps[:, 1], old_wps[:, 2],
-                    color="purple", s=30, marker="x", label="Old Waypoints")
+            ax.scatter(
+                old_wps[:, 0],
+                old_wps[:, 1],
+                old_wps[:, 2],
+                color="purple",
+                s=30,
+                marker="x",
+                label="Old Waypoints",
+            )
             for i, p in enumerate(old_wps):
                 ax.text(p[0], p[1], p[2], f"{i}", color="purple", fontsize=6)
 
         # --- Obstacles ---
         if self._obstacles_pos is not None and len(self._obstacles_pos) > 0:
             obstacles = np.array(self._obstacles_pos)
-            ax.scatter(obstacles[:, 0], obstacles[:, 1], obstacles[:, 2],
-                    color="crimson", s=50, marker="x", label="Obstacles")
+            ax.scatter(
+                obstacles[:, 0],
+                obstacles[:, 1],
+                obstacles[:, 2],
+                color="crimson",
+                s=50,
+                marker="x",
+                label="Obstacles",
+            )
 
         # --- Axes and layout ---
         ax.set_xlabel("X [m]")
@@ -300,9 +368,7 @@ class StateController(Controller):
         ax.legend(loc="best", fontsize=8)
 
         # Equal aspect ratio for 3D plot
-        ranges = np.array([
-            ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()
-        ])
+        ranges = np.array([ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()])
         max_range = np.ptp(ranges) / 2.0
         mid_x, mid_y, mid_z = np.mean(ranges, axis=1)
         ax.set_xlim3d(mid_x - max_range, mid_x + max_range)
@@ -311,4 +377,3 @@ class StateController(Controller):
 
         plt.tight_layout()
         plt.show()
-
