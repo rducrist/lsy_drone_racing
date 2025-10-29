@@ -67,8 +67,7 @@ def _insert_obstacle_bypasses(waypoints, obstacles, clearance, max_passes=2):
         if not changed:
             break
     return waypoints
-# -------------------------------------------------------------------------
-
+#-------------------------------------------------------------------------
 class StateController(Controller):
     """State controller with dynamic trajectory replanning and velocity-matched cubic splines."""
 
@@ -87,15 +86,17 @@ class StateController(Controller):
         self._gates_orientation = np.array(obs.get("gates_quat"))
         self._target_gate = int(obs.get("target_gate", 0))
 
+
         # --- Obstacle model (vertical cylinders), plan in XY ---
         self._drone_radius   = 0.15   # m (Prop-Scheibe + Tracking-Toleranz)
-        self._obs_radius     = 0.08   # m (Falls bekannt anpassen)
-        self._safety_margin  = 0.10   # m
+        self._obs_radius     = 0.10   # m (Falls bekannt anpassen)
+        self._safety_margin  = 0.04   # m
+       
         self._clearance      = self._drone_radius + self._obs_radius + self._safety_margin  # ~0.33 m
 
-        # Sanfte, optionale Repulsion (nur als Fallback)
-        self._avoid_radius   = 0.6
-        self._avoid_gain     = 0.3
+         # Sanfte, optionale Repulsion (nur als Fallback)
+        self._avoid_radius   = 0.3
+        self._avoid_gain     = 0.1
         self._max_corr       = np.array([0.6, 0.6, 0.4])
 
         self._obstacles_pos = np.array(obs.get("obstacles_pos", []))
@@ -108,16 +109,12 @@ class StateController(Controller):
         self._needs_replanning = False
 
         # PD gains
-        self._Kp = np.array([1.5, 1.5, 1.0])
-        self._Kd = np.array([0.4, 0.4, 0.1])
+        self._Kp = np.array([1.7, 1.7, 1.0])
+        self._Kd = np.array([0.3, 0.3, 0.1])
+        self._Kv = np.array([0.5, 0.5, 0.3])
 
         self._prev_pos_error = np.zeros(3)
         self._prev_time = 0.0
-
-        # obstacle avoidance
-        self._avoid_radius = 0.0
-        self._avoid_gain = 0.0
-        self._max_corr = np.array([1.0, 1.0, 1.0])
 
         # bookkeeping
         self._tick = 0
@@ -153,7 +150,7 @@ class StateController(Controller):
             self._needs_replanning = False
             return
 
-        APPROACH_DIST = 0.1
+        APPROACH_DIST = 0.2
         waypoints = [curr_pos]
         yaw_points = [self._yaw_current]
 
@@ -170,10 +167,11 @@ class StateController(Controller):
             yaw_points += [yaw, yaw, yaw]
 
         if len(waypoints) > 4 and self._target_gate < len(gates) -1:
+             # neuer waypoint
             waypoints.insert(-3, np.array([-1.0, -1.5, 1.0]))
             yaw_points.insert(-3, yaw_points[-3])
+           
 
-        
         # waypoints = np.array(waypoints)
         # yaw_points = np.array(yaw_points)
 
@@ -188,6 +186,17 @@ class StateController(Controller):
         yaw_idx_src = np.linspace(0.0, 1.0, num=len(yaw_points))
         yaw_idx_dst = np.linspace(0.0, 1.0, num=len(waypoints))
         yaw_points  = np.interp(yaw_idx_dst, yaw_idx_src, yaw_points)
+
+        # Entferne nahe Punkte, um streng steigende u_way zu gewährleisten
+        epsilon = 0.01
+        new_waypoints = [waypoints[0]]
+        new_yaw_points = [yaw_points[0]]
+        for i in range(1, len(waypoints)):
+            if np.linalg.norm(waypoints[i] - new_waypoints[-1]) > epsilon:
+                new_waypoints.append(waypoints[i])
+                new_yaw_points.append(yaw_points[i])
+        waypoints = np.array(new_waypoints)
+        yaw_points = np.array(new_yaw_points)
 
         seg_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
         cum_lengths = np.concatenate(([0.0], np.cumsum(seg_lengths)))
@@ -238,8 +247,8 @@ class StateController(Controller):
         self._yaw_current = R.from_quat(quat_current).as_euler("xyz", degrees=False)[2]
         gates_pos = np.array(obs.get("gates_pos", self._last_known_gates))
 
-        self._target_gate = np.array(obs.get("target_gate"))
-        
+        self._target_gate = int(obs.get("target_gate", self._target_gate))
+
 
         if not np.array_equal(gates_pos, self._last_known_gates):
             self._last_known_gates = gates_pos
@@ -254,10 +263,39 @@ class StateController(Controller):
         u = np.clip(t / self._t_total, 0.0, 1.0)
 
         des_pos = np.array([self._spline_x(u), self._spline_y(u), self._spline_z(u)])
-        
-        des_yaw = float(self._spline_yaw(u))
+        des_yaw = float(np.arctan2(self._spline_y(u, 1), self._spline_x(u, 1)))
 
+        du_dt = 1.0 / self._t_total
+
+        # 1. Ableitungen dr/du
+        dx_du  = self._spline_x(u, 1)
+        dy_du  = self._spline_y(u, 1)
+        dz_du  = self._spline_z(u, 1)
+
+        # 2. Ableitungen d2r/du2
+        d2x_du2 = self._spline_x(u, 2)
+        d2y_du2 = self._spline_y(u, 2)
+        d2z_du2 = self._spline_z(u, 2)
+
+        # Feedforward-Geschwindigkeit & -Beschleunigung (Kettenregel)
+        des_vel = np.array([dx_du, dy_du, dz_du]) * du_dt
+        des_acc = np.array([d2x_du2, d2y_du2, d2z_du2]) * (du_dt ** 2)
+
+
+        # Position and velocity errors
         pos_error = des_pos - self._pos_current
+        vel_error = des_vel - self._vel_current
+
+        # Gains (Beispielwerte, pro Achse tunen)
+        Kp = self._Kp
+        Kd = self._Kd
+        Kv = self._Kv
+
+        # „klassisches“ PD auf Position + Dämpfung auf v-Fehler + Feedforward a_des
+        dt = max(t - self._prev_time, 1e-6)
+        dpos_error = (pos_error - self._prev_pos_error) / dt
+
+        pos_correction = Kp * pos_error + Kd * dpos_error + Kv * vel_error
 
         # simple XY obstacle avoidance
         if self._obstacles_pos is not None and len(self._obstacles_pos) > 0:
@@ -269,12 +307,7 @@ class StateController(Controller):
                     mag = self._avoid_gain * (1 - dist_xy / self._avoid_radius)
                     pos_error[:2] += mag * dir_xy
 
-        # PD control
-        dt = max(t - self._prev_time, 1e-6)
-        d_error = (pos_error - self._prev_pos_error) / dt
-        pos_correction = self._Kp * pos_error + self._Kd * d_error
-        # pos_correction = np.clip(pos_correction, -self._max_corr, self._max_corr)
-
+        pos_correction = np.clip(pos_correction, -self._max_corr, self._max_corr)
         self._prev_pos_error = pos_error
         self._prev_time = t
 
