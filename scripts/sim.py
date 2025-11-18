@@ -21,6 +21,8 @@ from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 
 from lsy_drone_racing.utils import load_config, load_controller
 
+from lsy_drone_racing.utils.utils import draw_line
+
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
 
@@ -95,6 +97,25 @@ def simulate(
             controller_finished = controller.step_callback(
                 action, obs, reward, terminated, truncated, info
             )
+
+            if controller._predicted_traj is not None:
+                draw_line(
+                    env=env.unwrapped,
+                    points=controller._predicted_traj,
+                    rgba=np.array([0.0,0.3,1.0,0.7]),
+                    min_size=2.0,
+                    max_size=3.0
+                )
+
+            if controller.traj_viz is not None:
+                draw_line(
+                    env=env.unwrapped,
+                    points=controller.traj_viz,
+                    rgba=np.array([52, 200, 72, 0.8]),
+                    min_size=2.0,
+                    max_size=3.0
+                )
+
             # Add up reward, collisions
             if terminated or truncated or controller_finished:
                 break

@@ -159,7 +159,6 @@ class StateController(Controller):
     # -------------------------------------------------------------------------
     def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None):
         """PD tracking of cubic spline trajectory with velocity-matched start."""
-
         self._pos_current = np.array(obs.get("pos", np.zeros(3)))
         self._vel_current = np.array(obs.get("vel", np.zeros(3)))
         quat_current = np.array(obs.get("quat"))
