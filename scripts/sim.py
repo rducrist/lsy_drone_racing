@@ -23,6 +23,9 @@ from lsy_drone_racing.utils import load_config, load_controller
 
 from lsy_drone_racing.utils.utils import draw_line
 
+from scipy.spatial.transform import Rotation as R
+
+
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
 
@@ -31,6 +34,66 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+def _gate_plane_corners(gate_pos: np.ndarray, rpy: list[float]) -> tuple[np.ndarray, np.ndarray]:
+    """Return 4 corners for two rectangles around the gate center.
+    Ohne Rotation → Weltkoordinaten direkt. Mit Rotation → Lokale Koordinaten → Rotieren → Weltkoordinaten.
+    """
+   # First rectangle (smaller, 0.27m side)
+    y_min1 = -0.135
+    y_max1 = 0.135
+    z_min1 = -0.135
+    z_max1 = 0.135
+    local_corners1 = np.array([[0, y_min1, z_min1],
+                               [0, y_max1, z_min1],
+                               [0, y_max1, z_max1],
+                               [0, y_min1, z_max1]], dtype=float)
+    # Second rectangle (larger, 0.88m side)
+    y_min2 = -0.44
+    y_max2 = 0.44
+    z_min2 = -0.44
+    z_max2 = 0.44
+    local_corners2 = np.array([[0, y_min2, z_min2],
+                               [0, y_max2, z_min2],
+                               [0, y_max2, z_max2],
+                               [0, y_min2, z_max2]], dtype=float)
+    # Rotation matrix from rpy
+    rot = R.from_euler('xyz', rpy)
+    rot_matrix = rot.as_matrix()
+    
+    # Rotate and translate to world coordinates
+    corners1 = (rot_matrix @ local_corners1.T).T + gate_pos
+    corners2 = (rot_matrix @ local_corners2.T).T + gate_pos
+
+    return corners1, corners2
+
+def _draw_gate_plane_lines(env_unwrapped, gates, config, color=(0.0, 0.8, 0.0, 1.0), min_size: float = 2.0, max_size: float = 2.0):
+    """Draw rectangle edges for two rectangles per gate using draw_line.
+    env_unwrapped: env.unwrapped passed to draw_line as in existing calls.
+    gates: iterable of [x,y,z] gate centers.
+    config: config object to access gate rpy.
+    """
+    if gates is None:
+        return
+    rgba = np.array(color, dtype=float)
+    edges_idx = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    for i, g in enumerate(gates):
+        gate_config = config.env.track.gates[i]
+        rpy = gate_config['rpy']
+        corners1, corners2 = _gate_plane_corners(np.array(g), rpy)
+        for corners in [corners1, corners2]:
+            for a, b in edges_idx:
+                pts = np.vstack([corners[a], corners[b]])  # shape (2,3)
+                try:
+                    draw_line(env=env_unwrapped, points=pts, rgba=rgba, min_size=min_size, max_size=max_size)
+                except TypeError:
+                    # tolerant fallback if signature differs
+                    try:
+                        draw_line(points=pts, rgba=rgba, min_size=min_size, max_size=max_size)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
 
 def simulate(
@@ -107,6 +170,9 @@ def simulate(
                     max_size=3.0
                 )
 
+
+            
+
             if controller.traj_viz is not None:
                 draw_line(
                     env=env.unwrapped,
@@ -115,6 +181,10 @@ def simulate(
                     min_size=2.0,
                     max_size=3.0
                 )
+
+             # Draw gate plane edges
+            _draw_gate_plane_lines(env.unwrapped, obs.get("gates_pos"),config)
+
 
             # Add up reward, collisions
             if terminated or truncated or controller_finished:
