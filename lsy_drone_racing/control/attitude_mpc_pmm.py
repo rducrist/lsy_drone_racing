@@ -61,8 +61,8 @@ class AttitudeMPC(Controller):
         )
 
         # For visualising using drawline()
-        self.traj_pos_viz = self.traj_p
-        self.traj_vel_viz = self.traj_v
+        self.traj_pos_viz = self.traj_p[::10]
+        self.traj_vel_viz = self.traj_v[::10]
         self.traj_loaded = True
 
         self._tick = 0
