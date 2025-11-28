@@ -32,7 +32,7 @@ class AttitudeMPC(Controller):
         super().__init__(obs, info, config)
         self._env_id = config.env.id
 
-        self._N = 25
+        self._N = 20
         self._dt = 1 / config.env.freq
         self._T_HORIZON = self._N * self._dt
 
@@ -61,7 +61,8 @@ class AttitudeMPC(Controller):
         )
 
         # For visualising using drawline()
-        self.traj_viz = self.traj_p
+        self.traj_pos_viz = self.traj_p
+        self.traj_vel_viz = self.traj_v
         self.traj_loaded = True
 
         self._tick = 0

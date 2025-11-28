@@ -20,7 +20,6 @@ import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 
 from lsy_drone_racing.utils import load_config, load_controller
-
 from lsy_drone_racing.utils.utils import draw_line
 
 if TYPE_CHECKING:
@@ -107,14 +106,30 @@ def simulate(
                     max_size=3.0
                 )
 
-            if controller.traj_viz is not None:
-                draw_line(
-                    env=env.unwrapped,
-                    points=controller.traj_viz,
-                    rgba=np.array([52, 200, 72, 0.8]),
-                    min_size=2.0,
-                    max_size=3.0
-                )
+            if controller.traj_pos_viz is not None:
+                traj = controller.traj_pos_viz
+                speed = np.linalg.norm(controller.traj_vel_viz, axis=1)
+
+                # normalize speed
+                v_min, v_max = speed.min(), speed.max()
+                norm_speed = (speed - v_min) / (v_max - v_min + 1e-6)
+
+                # color map slow->green, fast->red
+                rgba_colors = np.zeros((len(speed), 4))
+                rgba_colors[:, 0] = norm_speed
+                rgba_colors[:, 1] = 1 - norm_speed
+                rgba_colors[:, 3] = 1.0
+
+                # draw each segment with its own color
+                for i in range(len(traj) - 1):
+                    seg = np.stack([traj[i], traj[i + 1]], axis=0)
+                    draw_line(
+                        env=env.unwrapped,
+                        points=seg,
+                        rgba=rgba_colors[i],
+                        min_size=2.0,
+                        max_size=3.0
+                    )   
 
             # Add up reward, collisions
             if terminated or truncated or controller_finished:
