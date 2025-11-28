@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-
 class AttitudeMPC(Controller):
     """Trajectory-generating MPC using attitude control with soft gate/obstacle costs."""
 
@@ -33,17 +32,16 @@ class AttitudeMPC(Controller):
         super().__init__(obs, info, config)
         self._env_id = config.env.id
 
-        self._N = 20
+        self._N = 25
         self._dt = 1 / config.env.freq
         self._T_HORIZON = self._N * self._dt
 
         # Known gate positions
-        self.gates = obs.get("gates_pos")
-        self.gate_radius = 0.15
+        self._gates = obs.get("gates_pos")
         self.current_gate_idx = 0
-
-        # Known obstacles (optional), each as [x,y,z,radius]
-        self.obstacles = obs.get("obstacles_pos")
+        self._obstacles = obs.get("obstacles_pos")
+        self._pos = obs.get("pos")
+        self._vel = obs.get("vel")
 
         self.drone_params = load_params("so_rpy", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
@@ -54,85 +52,74 @@ class AttitudeMPC(Controller):
         self._ny = self._nx + self._nu
         self._ny_e = self._nx
 
-        self._tick = 0
-        self._finished = False
-        self._config = config
-
         # PMM planner
-        self.traj_t = None
-        self.traj_p = None
-        self.traj_v = None
-        self.traj_a = None
+        self._waypoints = np.vstack((self._pos, self._gates))
+        self._start_vel = self._vel
+        self._end_vel = np.zeros(3)
+        self.traj_t, self.traj_p, self.traj_v, self.traj_a = self.pmm_traj(
+            self._waypoints, self._start_vel, self._end_vel, self._dt
+        )
 
         # For visualising using drawline()
-        self.traj_viz = None
-        self.traj_loaded = False
+        self.traj_viz = self.traj_p
+        self.traj_loaded = True
 
-        self._time_since_traj_start = 0.0
+        self._tick = 0
+        self._tick_max = len(self.traj_t) - 1 - self._N
+        self._finished = False
+        self._config = config
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Computes the control."""
-        # Convert quaternion to rpy
+        i = min(self._tick, self._tick_max)
+        if self._tick >= self._tick_max:
+            self._finished = True
+
+        # Setting the initial state
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
         x0 = np.concatenate((obs["pos"], obs["rpy"], obs["vel"], obs["drpy"]))
-
-        # Set initial state
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
-        t_now = self._time_since_traj_start
-        self._time_since_traj_start += self._dt
-
-        waypoints = np.vstack((obs.get("pos"), obs.get("gates_pos")))
-        start_vel = obs.get("vel")
-        end_vel = np.array([0.0, 0.0, 0.0])
-        self.traj_t, self.traj_p, self.traj_v, self.traj_a = self.pmm_traj(
-            waypoints, start_vel, end_vel, self._dt
-        )
-
-        idx0 = self._traj_index_from_time(self.traj_t, t_now)
-
         # Build horizon references
-        for k in range(self._N):
-            pos_des = self.traj_p[k]
-            vel_des = self.traj_v[k]
-            acc_des = self.traj_a[k]
+        pos_des = self.traj_p[i : i + self._N]
+        vel_des = self.traj_v[i : i + self._N]
+        acc_des = self.traj_a[i : i + self._N]
+        # yaw_des = np.arctan2(vel_des[:, 1], vel_des[:, 0])
 
-            yaw_des = np.arctan2(vel_des[1], vel_des[0])
+        # Fill yref: first nx entries are state; next nu entries are inputs
+        yref = np.zeros((self._N, self._ny))
+        # State part
+        yref[:, 0:3] = pos_des
+        # Let roll pitch yaw as zero
+        # Vel part
+        yref[:, 6:9] = vel_des
+        # Let drpy as zero
 
-            # fill yref: first nx entries are state; next nu entries are inputs
-            yref = np.zeros(self._ny)
-            # state part
-            yref[0:3] = pos_des
-            # rpy: compute feedforward rpy from acc
-            r_des, p_des, y_des, thrust_ff = self._acc_to_rpy_and_thrust(acc_des, yaw_des)
-            yref[3:6] = np.array([r_des, p_des, y_des])
-            # vel part
-            yref[6:9] = vel_des
-            # drpy part left as zeros (or you could approximate from trajectory)
-            # input part (u reference) goes after state in yref: indices nx ... nx+nu-1
-            yref[self._nx : self._nx + self._nu] = np.array([r_des, p_des, y_des, thrust_ff])
-            self._acados_ocp_solver.set(k, "yref", yref)
+        # Input part (u reference) goes after state in yref: indices nx ... nx+nu-1
+        # Zero roll pitch yaw
 
-            # Warm-start guess for x and u (helps solver converge fast)
-            # Build an x_guess consistent with the state order: [pos, rpy, vel, drpy]
-            x_guess = np.zeros(self._nx)
-            x_guess[0:3] = pos_des
-            x_guess[3:6] = np.array([r_des, p_des, y_des])
-            x_guess[6:9] = vel_des
-            # leave drpy zeros or approximate by finite differences if you have it
-            self._acados_ocp_solver.set(k, "x", x_guess)
-            self._acados_ocp_solver.set(k, "u", np.array([r_des, p_des, y_des, thrust_ff]))
+        # Set hover thrust
+        yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+
+        # Warm-start guess for x and u (helps solver converge fast)
+        # Build an x_guess consistent with the state order: [pos, rpy, vel, drpy]
+        x_guess = np.zeros((self._N, self._nx))
+        x_guess[:, 0:3] = pos_des
+        x_guess[:, 6:9] = vel_des
+        # leave drpy zeros
+
+        for j in range(self._N):
+            self._acados_ocp_solver.set(j, "yref", yref[j])
+            self._acados_ocp_solver.set(j, "x", x_guess[j])
 
         # Terminal reference (state only)
-        traj_idx_end = min(idx0 + self._N, len(self.traj_t) - 1)
         yref_e = np.zeros(self._ny_e)
-        yref_e[0:3] = self.traj_p[traj_idx_end]
-        yref_e[3:6] = np.array([0.0, 0.0, 0.0])  # fine to push yaw=0 or compute from accel at end
-        yref_e[6:9] = np.zeros(3)
+        yref_e[0:3] = self.traj_p[i + self._N]
+        yref_e[6:9] = self.traj_v[i + self._N]
         self._acados_ocp_solver.set(self._N, "y_ref", yref_e)
 
         # Solve MPC
@@ -157,56 +144,13 @@ class AttitudeMPC(Controller):
         info: dict,
     ) -> bool:
         self._tick += 1
-
-        # Update gate if reached
-        if np.linalg.norm(obs["pos"] - self.gates[self.current_gate_idx]) < self.gate_radius:
-            self.current_gate_idx = min(self.current_gate_idx + 1, len(self.gates) - 1)
-
         return False  # continuous control
 
     def episode_callback(self):
         self._tick = 0
-        self.current_gate_idx = 0
         self._finished = False
 
-    def _traj_index_from_time(self, t_s: float, t_now: float) -> int:
-        """Return index of trajectory time nearest and not earlier than t_now."""
-        if not self.traj_loaded:
-            return 0
-        # simple nearest index (you can also use bisect/np.searchsorted)
-        idx = np.searchsorted(t_s, t_now, side="left")
-        idx = max(0, min(idx, len(t_s) - 1))
-        return idx
-
     # --------------------- Some helper functions --------------
-    def _acc_to_rpy_and_thrust(self, acc_des: np.ndarray, yaw_des: float = 0.0):
-        """Convert desired acceleration (world frame) to desired roll, pitch, and thrust.
-
-        acc_des: 3-vector desired linear acceleration (m/s^2)
-        yaw_des: desired yaw (rad)
-        returns (r_des, p_des, y_des, thrust_scalar).
-        """
-        m = self.drone_params["mass"]
-        g_vec = np.array(self.drone_params["gravity_vec"])  # e.g. [0,0,-9.81]
-        # Required force in world frame
-        F = m * (acc_des - g_vec)  # note signs: a_des - g
-        F_norm = np.linalg.norm(F)
-        # Avoid division by zero
-        if F_norm < 1e-6:
-            # hover fallback
-            hover_thrust = m * -g_vec[-1]  # consistent with your hover reference
-            return 0.0, 0.0, yaw_des, hover_thrust
-
-        b3 = F / F_norm  # desired body z axis in world frame (unit)
-        # Decompose to roll (phi) and pitch (theta) for desired yaw psi
-        # Standard extraction:
-        # phi  = atan2(b3_y, b3_z)
-        # theta = atan2(-b3_x, sqrt(b3_y^2 + b3_z^2))
-        phi = float(np.arctan2(b3[1], b3[2]))
-        theta = float(np.arctan2(-b3[0], np.sqrt(b3[1] ** 2 + b3[2] ** 2)))
-        thrust = float(F_norm)
-
-        return phi, theta, yaw_des, thrust
 
     def pmm_traj(self, waypoints, start_vel, end_vel, sampling_period):
         """Generate a pmm trajectory for a given set of waypoints and start and end velocities."""
@@ -221,7 +165,7 @@ class AttitudeMPC(Controller):
 
         t_s, p_s, v_s, a_s = traj.get_sampled_trajectory(sampling_period)
         t_s, p_s, v_s, a_s = np.array(t_s), np.array(p_s), np.array(v_s), np.array(a_s)
-        
+
         self.traj_viz = p_s
         self.traj_viz[::100]
 
