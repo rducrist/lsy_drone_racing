@@ -64,15 +64,15 @@ def create_ocp_solver(
     # State weights
     Q = np.diag(
         [
-            50.0,  # pos
-            50.0,  # pos
+            30.0,  # pos
+            30.0,  # pos
             100.0,  # pos
             1.0,  # rpy
             1.0,  # rpy
             1.0,  # rpy
             10.0,  # vel
             10.0,  # vel
-            10.0,  # vel
+            50.0,  # vel
             5.0,  # drpy
             5.0,  # drpy
             5.0,  # drpy
@@ -110,15 +110,23 @@ def create_ocp_solver(
 
     # ----------- Constraint formulation ---------------
 
-    # # Set State Constraints (rpy < 30°)
-    # ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5])
-    # ocp.constraints.ubx = np.array([0.5, 0.5, 0.5])
-    # ocp.constraints.idxbx = np.array([3, 4, 5])
+    # Set State Constraints (rpy < 30°)
+    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.5, -0.5, -0.5])
+    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.5, 0.5, 0.5])
+    ocp.constraints.idxbx = np.array([0, 1, 2, 3, 4, 5])
 
     # Set Input Constraints (rpy < 30°)
     ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4])
     ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
+
+    # Set slackness on drone position
+    ocp.constraints.idxsbx = np.array([0, 1, 2], dtype=int)
+    nsbx = ocp.constraints.idxsbx.shape[0]
+    ocp.cost.Zl = 5*np.ones((nsbx,))
+    ocp.cost.Zu = 5*np.ones((nsbx,))
+    ocp.cost.zl = 100*np.ones((nsbx,))
+    ocp.cost.zu = 100*np.ones((nsbx,))
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
