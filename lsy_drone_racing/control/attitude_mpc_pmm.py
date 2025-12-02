@@ -9,8 +9,10 @@ Note that the trajectory uses pre-defined waypoints instead of dynamically gener
 
 from __future__ import annotations  # Python 3.10 type hints
 
+import time
 from typing import TYPE_CHECKING
 
+import matplotlib.pyplot as plt
 import numpy as np
 from drone_models.core import load_params
 from drone_models.utils.rotation import ang_vel2rpy_rates
@@ -44,7 +46,7 @@ class PmmMPC(Controller):
         self._pos = obs.get("pos")
         self._vel = obs.get("vel")
 
-        self.corridor = np.array([0.1, 0.1, 0.1])
+        self.corridor = np.array([0.05, 0.05, 0.05])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
         self.gate_influence_radius = 1
 
@@ -62,17 +64,22 @@ class PmmMPC(Controller):
 
         # PMM planner
         self._waypoints = self.generate_gate_waypoints(distance_before=0.5, distance_after=0.5)
-        # self._waypoints = np.vstack((self._pos, self._gates))
         self._start_vel = np.zeros(3)
         self._end_vel = np.array([2.0 , 0.0 , 0.0])
+
         self.traj_t, self.traj_p, self.traj_v, self.traj_a = self.pmm_traj(
             self._waypoints, self._start_vel, self._end_vel, self._dt
         )
+
 
         # For visualising using drawline()
         self.traj_pos_viz = self.traj_p[::5]
         self.traj_vel_viz = self.traj_v[::5]
         self.traj_loaded = True
+
+        # For debug
+        self.solver_times = []
+        self.ocp_costs = []
 
         self._tick = 0
         self._tick_max = len(self.traj_t) - 1 - self._N
@@ -172,7 +179,9 @@ class PmmMPC(Controller):
         self._acados_ocp_solver.set(self._N, "y_ref", yref_e)
 
         # Solve MPC
+        t_start = time.perf_counter_ns()
         self._acados_ocp_solver.solve()
+        t_end = time.perf_counter_ns()
         u0 = self._acados_ocp_solver.get(0, "u")
 
         predicted_positions = []
@@ -182,8 +191,10 @@ class PmmMPC(Controller):
         self._predicted_traj = np.array(predicted_positions)
 
         cost = self._acados_ocp_solver.get_cost()
-        print("COST", cost, "\n")
-        print("MAX VEL", np.linalg.norm(obs["vel"]),  "\n")
+        self.ocp_costs.append(cost)
+
+        self.solver_times.append((t_end - t_start)*1e-6)
+
         return u0
 
     def step_callback(
@@ -201,6 +212,9 @@ class PmmMPC(Controller):
     def episode_callback(self):
         self._tick = 0
         self._finished = False
+
+        self.plot_solver_times()
+
 
     # --------------------- Some helper functions --------------
 
@@ -226,10 +240,9 @@ class PmmMPC(Controller):
         return t_s, p_s, v_s, a_s
 
     def generate_gate_waypoints(self, distance_before=0.001, distance_after=0.01):
-        """
-        Returns a set of waypoints:
+        """Returns a set of waypoints
         - starting from drone position
-        - then for each gate: one waypoint before, one at the gate, one after
+        - then for each gate: one waypoint before, one at the gate, one after.
         """
         waypoints = [self._pos.copy()]  # start at drone
 
@@ -247,7 +260,31 @@ class PmmMPC(Controller):
             waypoints.append(wp_after)
 
             if i == 2:
-                wp_after[1] += -0.5
-                waypoints.append(wp_after)
+                extra_wp = gate_pos.copy()
+                extra_wp[1] -= 0.6
+                waypoints.append(extra_wp)
 
         return np.vstack(waypoints)
+    
+    def plot_solver_times(self):
+        """This function plots the solver time per tick."""
+        ticks = range(len(self.solver_times))
+
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+
+        # Solver time (left y-axis)
+        ax1.plot(ticks, self.solver_times, 'b.-', label='Solver time (ms)')
+        ax1.set_xlabel("Tick")
+        ax1.set_ylabel("Solver time (s)", color='b')
+        ax1.tick_params(axis='y', labelcolor='b')
+
+        # Cost (right y-axis)
+        ax2 = ax1.twinx()
+        ax2.plot(ticks, self.ocp_costs, 'r.-', label='OCP cost')
+        ax2.set_ylabel("OCP cost", color='r')
+        ax2.tick_params(axis='y', labelcolor='r')
+
+        plt.title("Solver Time and OCP Cost per Tick")
+        fig.tight_layout()
+        plt.grid(True)
+        plt.show()
