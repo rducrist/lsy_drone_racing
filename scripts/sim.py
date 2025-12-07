@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def simulate(
-    config: str = "level0.toml",
+    config: str = "level2.toml",
     controller: str | None = None,
     n_runs: int = 1,
     render: bool | None = None,
@@ -121,12 +121,12 @@ def simulate(
                 rgba_colors[:, 3] = 1.0
 
                 # draw each segment with its own color
-                for i in range(len(traj) - 1):
-                    seg = np.stack([traj[i], traj[i + 1]], axis=0)
+                for k in range(len(traj) - 1):
+                    seg = np.stack([traj[k], traj[k + 1]], axis=0)
                     draw_line(
                         env=env.unwrapped,
                         points=seg,
-                        rgba=rgba_colors[i],
+                        rgba=rgba_colors[k],
                         min_size=2.0,
                         max_size=3.0
                     )   
