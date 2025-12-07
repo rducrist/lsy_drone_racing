@@ -38,17 +38,13 @@ class PmmMPC(Controller):
         self._dt = 1 / config.env.freq
         self._T_HORIZON = self._N * self._dt
 
-        # Known gate positions
-        self._gates = obs.get("gates_pos")
-        self._gates_quat = obs.get("gates_quat")
-        self.current_gate_idx = obs.get("target_gate")
-        self._obstacles = obs.get("obstacles_pos")
-        self._pos = obs.get("pos")
-        self._vel = obs.get("vel")
+        self._update_obs(obs)
+        self._last_gate_pos = self._gates[self._current_gate_idx]
 
         self.corridor = np.array([0.05, 0.05, 0.05])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
         self.gate_influence_radius = 1
+        self._sensor_range = 0.65
 
         self.drone_params = load_params("so_rpy", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
@@ -63,26 +59,26 @@ class PmmMPC(Controller):
         )
 
         # PMM planner
-        self._waypoints = self.generate_gate_waypoints(distance_before=0.5, distance_after=0.5)
-        self._start_vel = np.zeros(3)
-        self._end_vel = np.array([2.0 , 0.0 , 0.0])
-
-        self.traj_t, self.traj_p, self.traj_v, self.traj_a = self.pmm_traj(
-            self._waypoints, self._start_vel, self._end_vel, self._dt
+        self._distance_before = 0.3
+        self._distance_after = 0.3
+        self._generate_gate_waypoints(
+            self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
+        self._start_vel = self._vel
+        self._end_vel = np.array([0.0, 0.0, 0.0])
 
+        self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
         # For visualising using drawline()
-        self.traj_pos_viz = self.traj_p[::5]
-        self.traj_vel_viz = self.traj_v[::5]
-        self.traj_loaded = True
+        self.traj_pos_viz = self._p_pmm[::5]
+        self.traj_vel_viz = self._v_pmm[::5]
 
         # For debug
         self.solver_times = []
         self.ocp_costs = []
 
         self._tick = 0
-        self._tick_max = len(self.traj_t) - 1 - self._N
+        self._tick_max = len(self._t_pmm) - 1 - self._N
 
         self._finished = False
         self._config = config
@@ -91,22 +87,29 @@ class PmmMPC(Controller):
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Computes the control."""
+        self._update_obs(obs)
+
+        # Setting the initial state
+        x0 = np.concatenate((self._pos, self._rpy, self._vel, self._drpy))
+        self._acados_ocp_solver.set(0, "lbx", x0)
+        self._acados_ocp_solver.set(0, "ubx", x0)
+
+        # compute current state
         i = min(self._tick, self._tick_max)
         if self._tick >= self._tick_max:
             self._finished = True
 
-        # Setting the initial state
-        self.current_gate_idx = obs.get("target_gate")
-        obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
-        obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
-        x0 = np.concatenate((obs["pos"], obs["rpy"], obs["vel"], obs["drpy"]))
-        self._acados_ocp_solver.set(0, "lbx", x0)
-        self._acados_ocp_solver.set(0, "ubx", x0)
+        dist_to_gate = np.linalg.norm(self._current_gate_pos - self._pos)
+        gate_moved = np.linalg.norm(self._last_gate_pos - self._current_gate_pos) > 0.001
+        entered_sensor_range = dist_to_gate < self._sensor_range
+
+        if gate_moved and entered_sensor_range:
+            self._replan_trajectory()
 
         # Build horizon references
-        pos_des = self.traj_p[i : i + self._N]
-        vel_des = self.traj_v[i : i + self._N]
-        acc_des = self.traj_a[i : i + self._N]
+        pos_des = self._p_pmm[i : i + self._N]
+        vel_des = self._v_pmm[i : i + self._N]
+        # acc_des = self.traj_a[i : i + self._N]
         # yaw_des = np.arctan2(vel_des[:, 1], vel_des[:, 0])
 
         # Fill yref: first nx entries are state; next nu entries are inputs
@@ -132,19 +135,12 @@ class PmmMPC(Controller):
         # leave drpy zeros
 
         # Set update constraints
-        gate_quat = obs["gates_quat"][self.current_gate_idx]
-        R_gate = R.from_quat(gate_quat).as_matrix()  # full SO3 rotation
+        R_gate = R.from_quat(self._current_gate_quat).as_matrix()  # full SO3 rotation
         corridor_rot = R_gate @ self.corridor  # rotate corridor
 
-        gate_pos = self._gates[self.current_gate_idx]  # (3,)
-        print("GTA POS:", gate_pos)
-
-        dist_now = np.linalg.norm(gate_pos - obs["pos"])
-
-        if dist_now < 1 * self.gate_influence_radius:
+        if dist_to_gate < 1 * self.gate_influence_radius:
             # near gate: tight corridor
             corridor = corridor_rot
-            print("\nNARROW\n")
         else:
             # Otherwise wider corridor
             corridor = self.corridor_default
@@ -155,13 +151,8 @@ class PmmMPC(Controller):
             ubx_j = self._ocp.constraints.ubx.copy()
 
             # Override position bounds
-            lbx_j[0:3] = gate_pos - corridor
-            ubx_j[0:3] = gate_pos + corridor
-
-            print("Lower slack: ", self._acados_ocp_solver.get(j, "sl"))
-            print("Upper slack: ", self._acados_ocp_solver.get(j, "su"))
-            print("Current gate index:", self.current_gate_idx)
-            print("Current distance to next gate", dist_now)
+            lbx_j[0:3] = self._current_gate_pos - corridor
+            ubx_j[0:3] = self._current_gate_pos + corridor
 
             stage = j + 1
             if stage <= self._N - 1:
@@ -174,8 +165,8 @@ class PmmMPC(Controller):
 
         # Terminal reference (state only)
         yref_e = np.zeros(self._ny_e)
-        yref_e[0:3] = self.traj_p[i + self._N]
-        yref_e[6:9] = self.traj_v[i + self._N]
+        yref_e[0:3] = self._p_pmm[i + self._N]
+        yref_e[6:9] = self._v_pmm[i + self._N]
         self._acados_ocp_solver.set(self._N, "y_ref", yref_e)
 
         # Solve MPC
@@ -193,7 +184,7 @@ class PmmMPC(Controller):
         cost = self._acados_ocp_solver.get_cost()
         self.ocp_costs.append(cost)
 
-        self.solver_times.append((t_end - t_start)*1e-6)
+        self.solver_times.append((t_end - t_start) * 1e-6)
 
         return u0
 
@@ -213,12 +204,26 @@ class PmmMPC(Controller):
         self._tick = 0
         self._finished = False
 
-        self.plot_solver_times()
-
+        # self.plot_solver_times()
 
     # --------------------- Some helper functions --------------
+    def _update_obs(self, obs: dict[str, NDArray[np.floating]]) -> None:
+        """Update internal state from observations."""
+        self._gates = obs.get("gates_pos")
+        self._gates_quat = obs.get("gates_quat")
+        self._pos = obs.get("pos")
+        self._quat = obs.get("quat")
+        self._vel = obs.get("vel")
+        self._ang_vel = obs.get("ang_vel")
+        self._current_gate_idx = int(obs.get("target_gate"))
 
-    def pmm_traj(self, waypoints, start_vel, end_vel, sampling_period):
+        self._current_gate_pos = self._gates[self._current_gate_idx]
+        self._current_gate_quat = self._gates_quat[self._current_gate_idx]
+
+        self._rpy = R.from_quat(self._quat).as_euler("xyz")
+        self._drpy = ang_vel2rpy_rates(self._quat, self._ang_vel)
+
+    def _compute_pmm_traj(self, waypoints, start_vel, end_vel, sampling_period) -> None:
         """Generate a pmm trajectory for a given set of waypoints and start and end velocities."""
         waypoints_config = {
             "start_velocity": start_vel,
@@ -232,21 +237,28 @@ class PmmMPC(Controller):
         t_s, p_s, v_s, a_s = traj.get_sampled_trajectory(sampling_period)
         t_s, p_s, v_s, a_s = np.array(t_s), np.array(p_s), np.array(v_s), np.array(a_s)
 
-        self.traj_viz = p_s
-        self.traj_viz[::100]
+        self._t_pmm = t_s
+        self._p_pmm = p_s
+        self._v_pmm = v_s
+        self._a_pmm = a_s
 
-        self.traj_loaded = True
+        self.traj_pos_viz = self._p_pmm[::5]
+        self.traj_vel_viz = self._v_pmm[::5]
 
-        return t_s, p_s, v_s, a_s
-
-    def generate_gate_waypoints(self, distance_before=0.001, distance_after=0.01):
-        """Returns a set of waypoints
-        - starting from drone position
-        - then for each gate: one waypoint before, one at the gate, one after.
+    def _generate_gate_waypoints(
+        self, start_pos, start_gate_idx, distance_before, distance_after
+    ) -> None:
+        """Returns a set of waypoints:
+        - starting from start_pos (current drone position)
+        - then for each gate from start_gate_idx onward: one waypoint before, one at the gate, one after.
         """
-        waypoints = [self._pos.copy()]  # start at drone
 
-        for i, gate_pos in enumerate(self._gates):
+        waypoints = [start_pos.copy()]  # start at drone
+
+        # validate start_gate_idx
+        n_gates = len(self._gates)
+        for i in range(start_gate_idx, n_gates):
+            gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
             R_gate = R.from_quat(gate_quat).as_matrix()
             gate_forward = R_gate[:, 0]  # x-axis of gate frame
@@ -254,18 +266,31 @@ class PmmMPC(Controller):
             wp_before = gate_pos - distance_before * gate_forward
             wp_after = gate_pos + distance_after * gate_forward
 
-            # Append waypoints in order: before, gate, after
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
             waypoints.append(wp_after)
 
-            if i == 2:
-                extra_wp = gate_pos.copy()
-                extra_wp[1] -= 0.6
-                waypoints.append(extra_wp)
+        self._waypoints = np.vstack(waypoints)
 
-        return np.vstack(waypoints)
-    
+    def _replan_trajectory(self) -> None:
+
+        self._generate_gate_waypoints(
+            self._pos, self._current_gate_idx, self._distance_before, self._distance_after
+        )
+        self._start_vel = self._vel
+        self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
+
+        # Update visualization
+        self.traj_pos_viz = self._p_pmm[::5]
+        self.traj_vel_viz = self._v_pmm[::5]
+
+        # Reset tick
+        self._tick = 0
+        self._tick_max = max(0, len(self._t_pmm) - 1 - self._N)
+
+        # Remember last gate position
+        self._last_gate_pos = self._current_gate_pos
+
     def plot_solver_times(self):
         """This function plots the solver time per tick."""
         ticks = range(len(self.solver_times))
@@ -273,16 +298,16 @@ class PmmMPC(Controller):
         fig, ax1 = plt.subplots(figsize=(10, 5))
 
         # Solver time (left y-axis)
-        ax1.plot(ticks, self.solver_times, 'b.-', label='Solver time (ms)')
+        ax1.plot(ticks, self.solver_times, "b.-", label="Solver time (ms)")
         ax1.set_xlabel("Tick")
-        ax1.set_ylabel("Solver time (s)", color='b')
-        ax1.tick_params(axis='y', labelcolor='b')
+        ax1.set_ylabel("Solver time (s)", color="b")
+        ax1.tick_params(axis="y", labelcolor="b")
 
         # Cost (right y-axis)
         ax2 = ax1.twinx()
-        ax2.plot(ticks, self.ocp_costs, 'r.-', label='OCP cost')
-        ax2.set_ylabel("OCP cost", color='r')
-        ax2.tick_params(axis='y', labelcolor='r')
+        ax2.plot(ticks, self.ocp_costs, "r.-", label="OCP cost")
+        ax2.set_ylabel("OCP cost", color="r")
+        ax2.tick_params(axis="y", labelcolor="r")
 
         plt.title("Solver Time and OCP Cost per Tick")
         fig.tight_layout()
