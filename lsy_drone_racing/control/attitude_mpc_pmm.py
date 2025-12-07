@@ -39,7 +39,7 @@ class PmmMPC(Controller):
         self._T_HORIZON = self._N * self._dt
 
         self._update_obs(obs)
-        self._last_gate_pos = self._gates[self._current_gate_idx]
+        self._last_gate_pos = self._gates[self._current_gate_idx].copy()
 
         self.corridor = np.array([0.05, 0.05, 0.05])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
@@ -197,10 +197,12 @@ class PmmMPC(Controller):
         truncated: bool,
         info: dict,
     ) -> bool:
+        """What is being called each sim step."""
         self._tick += 1
         return False  # continuous control
 
     def episode_callback(self):
+        """What has to be called at the end of episode."""
         self._tick = 0
         self._finished = False
 
@@ -223,7 +225,13 @@ class PmmMPC(Controller):
         self._rpy = R.from_quat(self._quat).as_euler("xyz")
         self._drpy = ang_vel2rpy_rates(self._quat, self._ang_vel)
 
-    def _compute_pmm_traj(self, waypoints, start_vel, end_vel, sampling_period) -> None:
+    def _compute_pmm_traj(
+        self,
+        waypoints: NDArray[np.floating],
+        start_vel: NDArray[np.floating],
+        end_vel: NDArray[np.floating],
+        sampling_period: float,
+    ) -> None:
         """Generate a pmm trajectory for a given set of waypoints and start and end velocities."""
         waypoints_config = {
             "start_velocity": start_vel,
@@ -246,13 +254,13 @@ class PmmMPC(Controller):
         self.traj_vel_viz = self._v_pmm[::5]
 
     def _generate_gate_waypoints(
-        self, start_pos, start_gate_idx, distance_before, distance_after
+        self,
+        start_pos: NDArray[np.floating],
+        start_gate_idx: int,
+        distance_before: float,
+        distance_after: float,
     ) -> None:
-        """Returns a set of waypoints:
-        - starting from start_pos (current drone position)
-        - then for each gate from start_gate_idx onward: one waypoint before, one at the gate, one after.
-        """
-
+        """This function generates a set of waypoints for each gate starting from current gate index."""
         waypoints = [start_pos.copy()]  # start at drone
 
         # validate start_gate_idx
@@ -273,7 +281,7 @@ class PmmMPC(Controller):
         self._waypoints = np.vstack(waypoints)
 
     def _replan_trajectory(self) -> None:
-
+        """Re-generates a pmm trajectory."""
         self._generate_gate_waypoints(
             self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
@@ -289,9 +297,9 @@ class PmmMPC(Controller):
         self._tick_max = max(0, len(self._t_pmm) - 1 - self._N)
 
         # Remember last gate position
-        self._last_gate_pos = self._current_gate_pos
+        self._last_gate_pos = self._current_gate_pos.copy()
 
-    def plot_solver_times(self):
+    def plot_solver_times(self) -> None:
         """This function plots the solver time per tick."""
         ticks = range(len(self.solver_times))
 
