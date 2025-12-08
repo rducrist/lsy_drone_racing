@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def simulate(
-    config: str = "level2.toml",
+    config: str = "level0.toml",
     controller: str | None = None,
     n_runs: int = 1,
     render: bool | None = None,
@@ -97,10 +97,10 @@ def simulate(
                 action, obs, reward, terminated, truncated, info
             )
 
-            if controller._predicted_traj is not None:
+            if controller.logger.current_prediction is not None:
                 draw_line(
                     env=env.unwrapped,
-                    points=controller._predicted_traj,
+                    points=controller.logger.current_prediction,
                     rgba=np.array([0.0,0.3,1.0,0.7]),
                     min_size=2.0,
                     max_size=3.0

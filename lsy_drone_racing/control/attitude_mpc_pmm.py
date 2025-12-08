@@ -22,6 +22,9 @@ from scipy.spatial.transform import Rotation as R
 from lsy_drone_racing.control import Controller
 from lsy_drone_racing.control.ocp_solver import create_ocp_solver
 
+from lsy_drone_racing.control.mpc_logger import MPCLogger
+from lsy_drone_racing.control.mpc_plotter import MPCPlotter
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -70,12 +73,11 @@ class PmmMPC(Controller):
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
         # For visualising using drawline()
+        self.logger = MPCLogger()
+        self.plotter = MPCPlotter(self.logger)
+
         self.traj_pos_viz = self._p_pmm[::5]
         self.traj_vel_viz = self._v_pmm[::5]
-
-        # For debug
-        self.solver_times = []
-        self.ocp_costs = []
 
         self._tick = 0
         self._tick_max = len(self._t_pmm) - 1 - self._N
@@ -107,85 +109,25 @@ class PmmMPC(Controller):
             self._replan_trajectory()
 
         # Build horizon references
-        pos_des = self._p_pmm[i : i + self._N]
-        vel_des = self._v_pmm[i : i + self._N]
-        # acc_des = self.traj_a[i : i + self._N]
-        # yaw_des = np.arctan2(vel_des[:, 1], vel_des[:, 0])
+        yref, yref_e, x_guess = self._build_references(i)
 
-        # Fill yref: first nx entries are state; next nu entries are inputs
-        yref = np.zeros((self._N, self._ny))
-        # State part
-        yref[:, 0:3] = pos_des
-        # Let roll pitch yaw as zero
-        # Vel part
-        yref[:, 6:9] = vel_des
-        # Let drpy as zero
-
-        # Input part (u reference) goes after state in yref: indices nx ... nx+nu-1
-        # Zero roll pitch yaw
-
-        # Set hover thrust
-        yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
-
-        # Warm-start guess for x and u (helps solver converge fast)
-        # Build an x_guess consistent with the state order: [pos, rpy, vel, drpy]
-        x_guess = np.zeros((self._N, self._nx))
-        x_guess[:, 0:3] = pos_des
-        x_guess[:, 6:9] = vel_des
-        # leave drpy zeros
-
-        # Set update constraints
-        R_gate = R.from_quat(self._current_gate_quat).as_matrix()  # full SO3 rotation
-        corridor_rot = R_gate @ self.corridor  # rotate corridor
-
-        if dist_to_gate < 1 * self.gate_influence_radius:
-            # near gate: tight corridor
-            corridor = corridor_rot
-        else:
-            # Otherwise wider corridor
-            corridor = self.corridor_default
-
-        for j in range(self._N):
-            # Copy base bounds for this stage
-            lbx_j = self._ocp.constraints.lbx.copy()
-            ubx_j = self._ocp.constraints.ubx.copy()
-
-            # Override position bounds
-            lbx_j[0:3] = self._current_gate_pos - corridor
-            ubx_j[0:3] = self._current_gate_pos + corridor
-
-            stage = j + 1
-            if stage <= self._N - 1:
-                self._acados_ocp_solver.set(stage, "lbx", lbx_j)
-                self._acados_ocp_solver.set(stage, "ubx", ubx_j)
-
-            self._acados_ocp_solver.set(j, "yref", yref[j])
-            self._acados_ocp_solver.set(j, "x", x_guess[j])
-            self._acados_ocp_solver.set(j, "u", self.last_u)
-
-        # Terminal reference (state only)
-        yref_e = np.zeros(self._ny_e)
-        yref_e[0:3] = self._p_pmm[i + self._N]
-        yref_e[6:9] = self._v_pmm[i + self._N]
-        self._acados_ocp_solver.set(self._N, "y_ref", yref_e)
+        # Apply corridor constraints and warm-starts
+        self._apply_constraints(i, yref, yref_e, x_guess)
 
         # Solve MPC
         t_start = time.perf_counter_ns()
-        self._acados_ocp_solver.solve()
+        u0, cost = self._solve_mpc()
         t_end = time.perf_counter_ns()
-        u0 = self._acados_ocp_solver.get(0, "u")
 
-        predicted_positions = []
-        for k in range(self._N + 1):
-            x_pred = self._acados_ocp_solver.get(k, "x")
-            predicted_positions.append(x_pred[:3])
-        self._predicted_traj = np.array(predicted_positions)
+        predictions = self._extract_predictions()
 
-        cost = self._acados_ocp_solver.get_cost()
-        self.ocp_costs.append(cost)
-
-        self.solver_times.append((t_end - t_start) * 1e-6)
-
+        self.logger.log_step(
+            solver_time=(t_end - t_start) * 1e-6,
+            cost=cost,
+            predictions=predictions,
+            state=self._pos,
+            control=u0
+        )
         return u0
 
     def step_callback(
@@ -203,12 +145,88 @@ class PmmMPC(Controller):
 
     def episode_callback(self):
         """What has to be called at the end of episode."""
+        # self.plotter.plot_solver_times()
+        # self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
 
-        # self.plot_solver_times()
-
     # --------------------- Some helper functions --------------
+    def _extract_predictions(self) -> NDArray[np.floating]:
+        preds = []
+        for k in range(self._N + 1):
+            x_pred = self._acados_ocp_solver.get(k, "x")
+            preds.append(x_pred[:3])
+        preds = np.asarray(preds)
+        return preds
+
+
+    def _solve_mpc(self) -> tuple[NDArray[np.floating], np.floating]:
+        self._acados_ocp_solver.solve()
+
+        u0 = self._acados_ocp_solver.get(0, "u")
+        cost = self._acados_ocp_solver.get_cost()
+
+        return u0, cost
+
+
+    def _apply_constraints(
+        self, i: int, yref: NDArray[np.floating], yref_e: NDArray[np.floating], x_guess: NDArray[np.floating]
+    ) -> None:
+        """Apply corridor constraints and initialize yref / x_guess in the solver."""
+        dist_to_gate = np.linalg.norm(self._current_gate_pos - self._pos)
+
+        R_gate = R.from_quat(self._current_gate_quat).as_matrix()
+        corridor_rot = R_gate @ self.corridor
+
+        if dist_to_gate < self.gate_influence_radius:
+            corridor = corridor_rot
+        else:
+            corridor = self.corridor_default
+
+        for j in range(self._N):
+            stage = j + 1
+
+            lbx_j = self._ocp.constraints.lbx.copy()
+            ubx_j = self._ocp.constraints.ubx.copy()
+
+            lbx_j[:3] = self._current_gate_pos - corridor
+            ubx_j[:3] = self._current_gate_pos + corridor
+
+            if stage <= self._N - 1:
+                self._acados_ocp_solver.set(stage, "lbx", lbx_j)
+                self._acados_ocp_solver.set(stage, "ubx", ubx_j)
+
+            self._acados_ocp_solver.set(j, "yref", yref[j])
+            self._acados_ocp_solver.set(j, "x", x_guess[j])
+            self._acados_ocp_solver.set(j, "u", self.last_u)
+
+        self._acados_ocp_solver.set(self._N, "y_ref", yref_e)
+
+    def _build_references(
+        self, i: int
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
+        """Build yref, terminal yref_e, and warm-start x_guess."""
+        pos_des = self._p_pmm[i : i + self._N]
+        vel_des = self._v_pmm[i : i + self._N]
+
+        # Stage references
+        yref = np.zeros((self._N, self._ny))
+        yref[:, 0:3] = pos_des
+        yref[:, 6:9] = vel_des
+        yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+
+        # Terminal reference
+        yref_e = np.zeros(self._ny_e)
+        yref_e[0:3] = self._p_pmm[i + self._N]
+        yref_e[6:9] = self._v_pmm[i + self._N]
+
+        # Warm-start guess
+        x_guess = np.zeros((self._N, self._nx))
+        x_guess[:, 0:3] = pos_des
+        x_guess[:, 6:9] = vel_des
+
+        return yref, yref_e, x_guess
+
     def _update_obs(self, obs: dict[str, NDArray[np.floating]]) -> None:
         """Update internal state from observations."""
         self._gates = obs.get("gates_pos")
@@ -298,26 +316,3 @@ class PmmMPC(Controller):
 
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
-
-    def plot_solver_times(self) -> None:
-        """This function plots the solver time per tick."""
-        ticks = range(len(self.solver_times))
-
-        fig, ax1 = plt.subplots(figsize=(10, 5))
-
-        # Solver time (left y-axis)
-        ax1.plot(ticks, self.solver_times, "b.-", label="Solver time (ms)")
-        ax1.set_xlabel("Tick")
-        ax1.set_ylabel("Solver time (s)", color="b")
-        ax1.tick_params(axis="y", labelcolor="b")
-
-        # Cost (right y-axis)
-        ax2 = ax1.twinx()
-        ax2.plot(ticks, self.ocp_costs, "r.-", label="OCP cost")
-        ax2.set_ylabel("OCP cost", color="r")
-        ax2.tick_params(axis="y", labelcolor="r")
-
-        plt.title("Solver Time and OCP Cost per Tick")
-        fig.tight_layout()
-        plt.grid(True)
-        plt.show()
