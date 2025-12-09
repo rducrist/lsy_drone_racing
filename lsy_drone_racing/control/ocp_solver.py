@@ -122,18 +122,28 @@ def create_ocp_solver(
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
     # Set obstacle constraints
+    ocp.parameter_values = np.zeros((8,))
+
+    obs_1 = cs.MX.sym("obs_1", 2)
+    obs_2 = cs.MX.sym("obs_2", 2)
+    obs_3 = cs.MX.sym("obs_3", 2)
+    obs_4 = cs.MX.sym("obs_4", 2)
+    
+
+    ocp.model.p = cs.vertcat(obs_1, obs_2, obs_3, obs_4)
+
     ocp.constraints.constr_type = "BGH"
-    # ocp.model.con_h_expr_0 = 0.15**2 - (ocp.model.x[0]-0.0)**2 - (ocp.model.x[1]-0.55)**2
-    obs1 =  0.15**2 - (ocp.model.x[0]-0.0)**2 - (ocp.model.x[1]-0.45)**2
-    obs2 =  0.15**2 - (ocp.model.x[0]-1.25)**2 - (ocp.model.x[1]-0.25)**2
-    obs3 =  0.15**2 - (ocp.model.x[0]+1.5)**2 - (ocp.model.x[1]+1.25)**2
-    obs4 =  0.15**2 - (ocp.model.x[0]+0.5)**2 - (ocp.model.x[1]+0.75)**2
+    obs1 =  0.15**2 - (ocp.model.x[0]-obs_1[0])**2 - (ocp.model.x[1]-obs_1[1])**2
+    obs2 =  0.15**2 - (ocp.model.x[0]-obs_2[0])**2 - (ocp.model.x[1]-obs_2[1])**2
+    obs3 =  0.15**2 - (ocp.model.x[0]-obs_3[0])**2 - (ocp.model.x[1]-obs_3[1])**2
+    obs4 =  0.15**2 - (ocp.model.x[0]-obs_4[0])**2 - (ocp.model.x[1]-obs_4[1])**2
+
     obss = cs.vertcat(obs1, obs2, obs3, obs4)
     ocp.model.con_h_expr =  obss
 
     ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3])
     ocp.constraints.uh = np.array([0, 0, 0, 0])
-    ocp.constraints.idxsh = np.array([0,1])
+    ocp.constraints.idxsh = np.array([0,1,2,3])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 5*np.ones((nsbx,))
     ocp.cost.Zu = 50*np.ones((nsbx,))

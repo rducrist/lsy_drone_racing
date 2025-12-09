@@ -144,8 +144,8 @@ class PmmMPC(Controller):
 
     def episode_callback(self):
         """What has to be called at the end of episode."""
-        self.plotter.plot_solver_times()
-        self.plotter.plot_costs()
+        # self.plotter.plot_solver_times()
+        # self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
 
@@ -194,6 +194,14 @@ class PmmMPC(Controller):
             # if stage <= self._N - 1:
                 # self._acados_ocp_solver.set(stage, "lbx", lbx_j)
                 # self._acados_ocp_solver.set(stage, "ubx", ubx_j)
+            
+            obs1 = self._obstacles[0]
+            obs2 = self._obstacles[1]
+            obs3 = self._obstacles[2]
+            obs4 = self._obstacles[3]
+
+            p = np.hstack([obs1[:2], obs2[:2], obs3[:2], obs4[:2]])
+            self._acados_ocp_solver.set(stage, "p", p)
 
             self._acados_ocp_solver.set(j, "yref", yref[j])
             self._acados_ocp_solver.set(j, "x", x_guess[j])
@@ -234,7 +242,9 @@ class PmmMPC(Controller):
         self._quat = obs.get("quat")
         self._vel = obs.get("vel")
         self._ang_vel = obs.get("ang_vel")
+        self._obstacles = obs.get("obstacles_pos")
         self._current_gate_idx = int(obs.get("target_gate"))
+        self._current_obstacle_idx = int(obs.get("obstacles_visited")[-1])
 
         self._current_gate_pos = self._gates[self._current_gate_idx]
         self._current_gate_quat = self._gates_quat[self._current_gate_idx]
