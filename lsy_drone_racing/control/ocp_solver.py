@@ -6,6 +6,7 @@ import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from drone_models.so_rpy import symbolic_dynamics_euler
+import casadi as cs
 
 
 def create_acados_model(parameters: dict) -> AcadosModel:
@@ -120,13 +121,24 @@ def create_ocp_solver(
     ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
-    # Set slackness on drone position
-    ocp.constraints.idxsbx = np.array([0, 1, 2], dtype=int)
-    nsbx = ocp.constraints.idxsbx.shape[0]
+    # Set obstacle constraints
+    ocp.constraints.constr_type = "BGH"
+    # ocp.model.con_h_expr_0 = 0.15**2 - (ocp.model.x[0]-0.0)**2 - (ocp.model.x[1]-0.55)**2
+    obs1 =  0.15**2 - (ocp.model.x[0]-0.0)**2 - (ocp.model.x[1]-0.45)**2
+    obs2 =  0.15**2 - (ocp.model.x[0]-1.25)**2 - (ocp.model.x[1]-0.25)**2
+    obs3 =  0.15**2 - (ocp.model.x[0]+1.5)**2 - (ocp.model.x[1]+1.25)**2
+    obs4 =  0.15**2 - (ocp.model.x[0]+0.5)**2 - (ocp.model.x[1]+0.75)**2
+    obss = cs.vertcat(obs1, obs2, obs3, obs4)
+    ocp.model.con_h_expr =  obss
+
+    ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3])
+    ocp.constraints.uh = np.array([0, 0, 0, 0])
+    ocp.constraints.idxsh = np.array([0,1])
+    nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 5*np.ones((nsbx,))
-    ocp.cost.Zu = 5*np.ones((nsbx,))
-    ocp.cost.zl = 100*np.ones((nsbx,))
-    ocp.cost.zu = 100*np.ones((nsbx,))
+    ocp.cost.Zu = 50*np.ones((nsbx,))
+    ocp.cost.zl = 1*np.ones((nsbx,))
+    ocp.cost.zu = 350*np.ones((nsbx,))
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))

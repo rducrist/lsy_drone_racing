@@ -12,7 +12,6 @@ from __future__ import annotations  # Python 3.10 type hints
 import time
 from typing import TYPE_CHECKING
 
-import matplotlib.pyplot as plt
 import numpy as np
 from drone_models.core import load_params
 from drone_models.utils.rotation import ang_vel2rpy_rates
@@ -20,10 +19,9 @@ from pmm_planner.utils import plan_pmm_trajectory
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.control import Controller
-from lsy_drone_racing.control.ocp_solver import create_ocp_solver
-
 from lsy_drone_racing.control.mpc_logger import MPCLogger
 from lsy_drone_racing.control.mpc_plotter import MPCPlotter
+from lsy_drone_racing.control.ocp_solver import create_ocp_solver
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -39,7 +37,8 @@ class PmmMPC(Controller):
 
         self._N = 20
         self._dt = 1 / config.env.freq
-        self._T_HORIZON = self._N * self._dt
+        # self._T_HORIZON = self._N * self._dt
+        self._T_HORIZON = 0.7
 
         self._update_obs(obs)
         self._last_gate_pos = self._gates[self._current_gate_idx].copy()
@@ -145,8 +144,8 @@ class PmmMPC(Controller):
 
     def episode_callback(self):
         """What has to be called at the end of episode."""
-        # self.plotter.plot_solver_times()
-        # self.plotter.plot_costs()
+        self.plotter.plot_solver_times()
+        self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
 
@@ -186,15 +185,15 @@ class PmmMPC(Controller):
         for j in range(self._N):
             stage = j + 1
 
-            lbx_j = self._ocp.constraints.lbx.copy()
-            ubx_j = self._ocp.constraints.ubx.copy()
+            # lbx_j = self._ocp.constraints.lbx.copy()
+            # ubx_j = self._ocp.constraints.ubx.copy()
 
-            lbx_j[:3] = self._current_gate_pos - corridor
-            ubx_j[:3] = self._current_gate_pos + corridor
+            # lbx_j[:3] = self._current_gate_pos - corridor
+            # ubx_j[:3] = self._current_gate_pos + corridor
 
-            if stage <= self._N - 1:
-                self._acados_ocp_solver.set(stage, "lbx", lbx_j)
-                self._acados_ocp_solver.set(stage, "ubx", ubx_j)
+            # if stage <= self._N - 1:
+                # self._acados_ocp_solver.set(stage, "lbx", lbx_j)
+                # self._acados_ocp_solver.set(stage, "ubx", ubx_j)
 
             self._acados_ocp_solver.set(j, "yref", yref[j])
             self._acados_ocp_solver.set(j, "x", x_guess[j])
