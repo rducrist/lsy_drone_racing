@@ -5,13 +5,13 @@ from __future__ import annotations  # Python 3.10 type hints
 import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from drone_models.so_rpy import symbolic_dynamics_euler
+from drone_models.so_rpy import symbolic_dynamics_euler_mpcc
 import casadi as cs
 
 
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
-    X_dot, X, U, _ = symbolic_dynamics_euler(
+    X_dot, X, U, _ = symbolic_dynamics_euler_mpcc(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
         J=parameters["J"],
@@ -31,6 +31,68 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     model.x = X
     model.u = U
 
+    #MPCC Parameters
+    p = cs.MX.sym("p", 17) #für MPCC 9 + 8 (4 Hindernisse mit je 2D Position)
+    model.p = p
+    
+    p_ref = p[0:3]
+    t_ref = p[3:6]
+    qc    = p[6]
+    ql    = p[7]
+    mu    = p[8]
+
+    # ---- Obstacle-Teil ----------------------------
+    obs_1 = p[9:11]
+    obs_2 = p[11:13]
+    obs_3 = p[13:15]
+    obs_4 = p[15:17]
+
+    #Extract variables from state / input 
+    pos    = X[0:3]
+    vtheta = X[-1]       # last state
+    dvtheta_cmd = U[4]
+    u_rpy  = U[0:3]
+    u_T    = U[3]
+
+    #MPCC error terms el, ec
+    delta = pos - p_ref
+    lag_err = cs.dot(delta, t_ref)
+    cont_err = delta - lag_err * t_ref
+
+    ec_sq = cs.dot(cont_err, cont_err)
+    el_sq = lag_err**2
+
+    #Regularitaion weights 
+    R_vth = parameters.get("R_vtheta", 1.0)
+    R_u   = parameters.get("R_inputs", 1.0)
+    R_T   = parameters.get("R_thrust", 10.0)    
+
+    #MPCC Stage Cost
+
+    stage_cost = (
+        qc * ec_sq +            # contouring
+        ql * el_sq +            # lag
+        R_vth * dvtheta_cmd**2 +# smooth progress accel
+        R_u   * cs.dot(u_rpy, u_rpy) +
+        R_T   * u_T**2 -
+        mu * vtheta             # progress reward
+    )
+    
+    # Terminal cost (no inputs)
+    terminal_cost = qc * ec_sq + ql * el_sq
+
+    # Set cost expressions
+    model.cost_expr_ext_cost   = stage_cost
+    model.cost_expr_ext_cost_e = terminal_cost
+
+    # Obstacle-Constraint-Funktion (wenn du BGH behalten willst)
+    r1 = 0.15**2 - ( (pos[0]-obs_1[0])**2 + (pos[1]-obs_1[1])**2 )
+    r2 = 0.15**2 - ( (pos[0]-obs_2[0])**2 + (pos[1]-obs_2[1])**2 )
+    r3 = 0.15**2 - ( (pos[0]-obs_3[0])**2 + (pos[1]-obs_3[1])**2 )
+    r4 = 0.15**2 - ( (pos[0]-obs_4[0])**2 + (pos[1]-obs_4[1])**2 )
+
+    model.con_h_expr = cs.vertcat(r1, r2, r3, r4)
+
     return model
 
 
@@ -44,10 +106,12 @@ def create_ocp_solver(
     ocp.model = create_acados_model(parameters)
 
     # Get Dimensions
-    nx = ocp.model.x.rows()
-    nu = ocp.model.u.rows()
-    ny = nx + nu
-    ny_e = nx
+    nx = ocp.model.x.rows() # 14
+    nu = ocp.model.u.rows() # 5
+    np_param = ocp.model.p.rows() # 17
+    
+    ocp.dims.np= np_param
+    ocp.parameter_values = np.zeros((np_param,))
 
     # Set dimensions
     ocp.solver_options.N_horizon = N
@@ -58,56 +122,9 @@ def create_ocp_solver(
     #
 
     # Cost Type
-    ocp.cost.cost_type = "LINEAR_LS"
-    ocp.cost.cost_type_e = "LINEAR_LS"
+    ocp.cost.cost_type = "EXTERNAL"
+    ocp.cost.cost_type_e = "EXTERNAL"
 
-    # Weights
-    # State weights
-    Q = np.diag(
-        [
-            30.0,  # pos
-            30.0,  # pos
-            100.0,  # pos
-            1.0,  # rpy
-            1.0,  # rpy
-            1.0,  # rpy
-            10.0,  # vel
-            10.0,  # vel
-            50.0,  # vel
-            5.0,  # drpy
-            5.0,  # drpy
-            5.0,  # drpy
-        ]
-    )
-    # Input weights (reference is upright orientation and hover thrust)
-    R = np.diag(
-        [
-            1.0,  # rpy
-            1.0,  # rpy
-            1.0,  # rpy
-            10.0,  # thrust
-        ]
-    )
-
-    # -------- Cost formulation --------------------
-    Q_e = Q.copy()
-    ocp.cost.W = scipy.linalg.block_diag(Q, R)
-    ocp.cost.W_e = Q_e
-
-    Vx = np.zeros((ny, nx))
-    Vx[0:nx, 0:nx] = np.eye(nx)  # Select all states
-    ocp.cost.Vx = Vx
-
-    Vu = np.zeros((ny, nu))
-    Vu[nx : nx + nu, :] = np.eye(nu)  # Select all actions
-    ocp.cost.Vu = Vu
-
-    Vx_e = np.zeros((ny_e, nx))
-    Vx_e[0:nx, 0:nx] = np.eye(nx)  # Select all states
-    ocp.cost.Vx_e = Vx_e
-
-    # Set initial references (we will overwrite these later on to make the controller track the traj.)
-    ocp.cost.yref, ocp.cost.yref_e = np.zeros((ny,)), np.zeros((ny_e,))
 
     # ----------- Constraint formulation ---------------
 
@@ -116,39 +133,25 @@ def create_ocp_solver(
     ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.5, 0.5, 0.5])
     ocp.constraints.idxbx = np.array([0, 1, 2, 3, 4, 5])
 
-    # Set Input Constraints (rpy < 30°)
-    ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4])
-    ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
-    ocp.constraints.idxbu = np.array([0, 1, 2, 3])
+    # Set Input Constraints 
+    # (rpy < 30°) and (thrust within physical limits) and (dvtheta_cmd limits)
+    dvtheta_min = -2.0
+    dvtheta_max =  2.0
+    ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4, dvtheta_min])
+    ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4, dvtheta_max])
+    ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
-    # Set obstacle constraints
-    ocp.parameter_values = np.zeros((8,))
 
-    obs_1 = cs.MX.sym("obs_1", 2)
-    obs_2 = cs.MX.sym("obs_2", 2)
-    obs_3 = cs.MX.sym("obs_3", 2)
-    obs_4 = cs.MX.sym("obs_4", 2)
-    
-
-    ocp.model.p = cs.vertcat(obs_1, obs_2, obs_3, obs_4)
-
+    # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
     ocp.constraints.constr_type = "BGH"
-    obs1 =  0.15**2 - (ocp.model.x[0]-obs_1[0])**2 - (ocp.model.x[1]-obs_1[1])**2
-    obs2 =  0.15**2 - (ocp.model.x[0]-obs_2[0])**2 - (ocp.model.x[1]-obs_2[1])**2
-    obs3 =  0.15**2 - (ocp.model.x[0]-obs_3[0])**2 - (ocp.model.x[1]-obs_3[1])**2
-    obs4 =  0.15**2 - (ocp.model.x[0]-obs_4[0])**2 - (ocp.model.x[1]-obs_4[1])**2
-
-    obss = cs.vertcat(obs1, obs2, obs3, obs4)
-    ocp.model.con_h_expr =  obss
-
     ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3])
-    ocp.constraints.uh = np.array([0, 0, 0, 0])
-    ocp.constraints.idxsh = np.array([0,1,2,3])
+    ocp.constraints.uh = np.array([0.0, 0.0, 0.0, 0.0])
+    ocp.constraints.idxsh = np.array([0, 1, 2, 3])
     nsbx = ocp.constraints.idxsh.shape[0]
-    ocp.cost.Zl = 5*np.ones((nsbx,))
-    ocp.cost.Zu = 50*np.ones((nsbx,))
-    ocp.cost.zl = 1*np.ones((nsbx,))
-    ocp.cost.zu = 350*np.ones((nsbx,))
+    ocp.cost.Zl = 5 * np.ones((nsbx,))
+    ocp.cost.Zu = 50 * np.ones((nsbx,))
+    ocp.cost.zl = 1 * np.ones((nsbx,))
+    ocp.cost.zu = 350 * np.ones((nsbx,))
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
