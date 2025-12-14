@@ -35,7 +35,7 @@ class PmmMPC(Controller):
         super().__init__(obs, info, config)
         self._env_id = config.env.id
 
-        self._N = 20
+        self._N = 15
         self._dt = 1 / config.env.freq
         # self._T_HORIZON = self._N * self._dt
         self._T_HORIZON = 0.7
@@ -43,7 +43,7 @@ class PmmMPC(Controller):
         self._update_obs(obs)
         self._last_gate_pos = self._gates[self._current_gate_idx].copy()
 
-        self.corridor = np.array([0.05, 0.05, 0.05])
+        self.corridor = np.array([0.1, 0.1, 0.1])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
         self.gate_influence_radius = 1
         self._sensor_range = 0.65
@@ -91,8 +91,8 @@ class PmmMPC(Controller):
         self._config = config
 
         # MPCC weights (used in parameter p[j, 6:9])
-        self._qc = 10.0
-        self._ql = 1.0
+        self._qc = 50.0
+        self._ql = 80.0
         self._mu = 1.0
 
     def compute_control(
@@ -103,14 +103,23 @@ class PmmMPC(Controller):
     
         # Initial progress state based on closest point on PMM path
         s_cur, _ = self._project_on_pmm_path(self._pos)
-
+        p_ref, t_ref = self._pos_and_tangent_from_s(s_cur)
+        v_par = float(np.dot(self._vel, t_ref))  # Projektion
+        #Variante A:
         if self._tick == 0:
             theta0 = s_cur
-            # simple initial guess for vtheta: projection of vel onto path tangent
             vtheta0 = max(0.1, np.linalg.norm(self._vel))
         else:
             theta0 = self._last_theta
             vtheta0 = self._last_vtheta
+        #Variante B:
+        # if self._tick == 0 or self._just_replanned:
+        #     theta0 = s_cur
+        #     vtheta0 = np.clip(v_par, 0.1, 1.0)   # sanft clampen
+        #     self._just_replanned = False
+        # else:
+        #     theta0 = self._last_theta
+        #     vtheta0 = self._last_vtheta
 
         # Set initial state x0 for OCP
         x0 = np.concatenate((self._pos, self._rpy, self._vel, self._drpy, np.array([theta0, vtheta0])))
@@ -126,8 +135,8 @@ class PmmMPC(Controller):
         gate_moved = np.linalg.norm(self._last_gate_pos - self._current_gate_pos) > 0.001
         entered_sensor_range = dist_to_gate < self._sensor_range
 
-        if gate_moved and entered_sensor_range:
-            self._replan_trajectory()
+        # if gate_moved and entered_sensor_range:
+        #     self._replan_trajectory()
 
 
         # Build MPCC parameter horizon & warm-start states

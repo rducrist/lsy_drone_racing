@@ -63,9 +63,9 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     el_sq = lag_err**2
 
     #Regularitaion weights 
-    R_vth = parameters.get("R_vtheta", 1.0)
-    R_u   = parameters.get("R_inputs", 1.0)
-    R_T   = parameters.get("R_thrust", 10.0)    
+    R_vth = parameters.get("R_vtheta", 3.5) # weight for smooth progress accel
+    R_u   = parameters.get("R_inputs", 1.0) # weight for control inputs rpy
+    R_T   = parameters.get("R_thrust", 5.0) # weight for thrust 
 
     #MPCC Stage Cost
 
@@ -135,8 +135,8 @@ def create_ocp_solver(
 
     # Set Input Constraints 
     # (rpy < 30°) and (thrust within physical limits) and (dvtheta_cmd limits)
-    dvtheta_min = -2.0
-    dvtheta_max =  2.0
+    dvtheta_min = -5.0
+    dvtheta_max =  5.0
     ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4, dvtheta_min])
     ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4, dvtheta_max])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
@@ -149,7 +149,7 @@ def create_ocp_solver(
     ocp.constraints.idxsh = np.array([0, 1, 2, 3])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 5 * np.ones((nsbx,))
-    ocp.cost.Zu = 50 * np.ones((nsbx,))
+    ocp.cost.Zu = 5 * np.ones((nsbx,))
     ocp.cost.zl = 1 * np.ones((nsbx,))
     ocp.cost.zu = 350 * np.ones((nsbx,))
 
