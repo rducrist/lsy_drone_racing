@@ -91,9 +91,9 @@ class PmmMPC(Controller):
         self._config = config
 
         # MPCC weights (used in parameter p[j, 6:9])
-        self._qc = 50.0
+        self._qc = 60.0
         self._ql = 80.0
-        self._mu = 1.0
+        self._mu = 1.3
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
@@ -167,7 +167,7 @@ class PmmMPC(Controller):
             control=u0
         )
         self.last_u = u0.copy()
-        print(f"theta0={theta0:.3f}, vtheta0={vtheta0:.3f}, u0={u0}")
+        # print(f"theta0={theta0:.3f}, vtheta0={vtheta0:.3f}, u0={u0}")
         return u0[:4]
 
     def step_callback(
@@ -380,16 +380,44 @@ class PmmMPC(Controller):
         """Generate a set of waypoints for each gate starting from the current gate index."""
         waypoints = [start_pos.copy()]  # start at drone
         n_gates = len(self._gates)
+        short_after = 0.2           # 0.1 m hinter dem Gate
         for i in range(start_gate_idx, n_gates):
             gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
             R_gate = R.from_quat(gate_quat).as_matrix()
             gate_forward = R_gate[:, 0]  # x-axis of gate frame
+
             wp_before = gate_pos - distance_before * gate_forward
             wp_after = gate_pos + distance_after * gate_forward
+
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
+
+             # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
+            if i == 2: 
+                # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
+                wp_after_short = gate_pos + short_after * gate_forward
+                waypoints.append(wp_after_short)
+
+                # 2) zurück zum Gate 3 (wieder durch’s Gate)
+                waypoints.append(gate_pos)
+
+                # 3) wieder vor Gate 3 (Richtung Gate 4 ausrichten)
+                waypoints.append(wp_before)
+                # Instead of wp_after, go directly to BEFORE Gate 4
+                if i + 1 < n_gates:
+                    next_gate_pos = self._gates[i+1]
+                    next_gate_quat = self._gates_quat[i+1]
+                    R_next = R.from_quat(next_gate_quat).as_matrix()
+                    next_forward = R_next[:, 0]
+
+                    next_wp_before = next_gate_pos - distance_before * next_forward
+                    waypoints.append(next_wp_before)
+                continue  # skip the normal wp_after
+
+        # Otherwise: add normal AFTER waypoint
             waypoints.append(wp_after)
+
         self._waypoints = np.vstack(waypoints)
 
     def _replan_trajectory(self) -> None:

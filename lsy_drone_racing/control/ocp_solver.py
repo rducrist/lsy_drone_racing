@@ -129,16 +129,16 @@ def create_ocp_solver(
     # ----------- Constraint formulation ---------------
 
     # Set State Constraints (rpy < 30°)
-    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.5, -0.5, -0.5])
-    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.5, 0.5, 0.5])
+    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.8, -0.8, -0.8])
+    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.8, 0.8, 0.8])
     ocp.constraints.idxbx = np.array([0, 1, 2, 3, 4, 5])
 
     # Set Input Constraints 
     # (rpy < 30°) and (thrust within physical limits) and (dvtheta_cmd limits)
     dvtheta_min = -5.0
     dvtheta_max =  5.0
-    ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4, dvtheta_min])
-    ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4, dvtheta_max])
+    ocp.constraints.lbu = np.array([-0.7, -0.7, -0.7, parameters["thrust_min"] * 4, dvtheta_min])
+    ocp.constraints.ubu = np.array([0.8, 0.8, 0.8, parameters["thrust_max"] * 4, dvtheta_max])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
 
