@@ -20,6 +20,8 @@ class MPCLogger:
         self.current_prediction : NDArray =[]
         self.states: List[NDArray] = []
         self.controls: List[NDArray] = []
+        self.gate_inner_ring: NDArray = []
+        self.gate_outer_ring: NDArray = []
 
     def log_step(
         self,
@@ -29,6 +31,8 @@ class MPCLogger:
         state: NDArray | None = None,
         control: NDArray | None = None,
         timestamp: float | None = None,
+        gate_inner_ring: NDArray | None = None,
+        gate_outer_ring: NDArray | None = None
     ) -> None:
         """Defines what has to logged each step."""
         if solver_time is not None:
@@ -44,3 +48,9 @@ class MPCLogger:
             self.controls.append(control.copy())
         if timestamp is not None:
             self.timestamps.append(timestamp)
+        if gate_inner_ring is not None:
+            self.gate_inner_ring = gate_inner_ring
+        if gate_outer_ring is not None:
+            self.gate_outer_ring = gate_outer_ring    
+
+        
