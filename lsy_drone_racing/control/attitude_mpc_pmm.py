@@ -128,7 +128,7 @@ class PmmMPC(Controller):
 
         predictions = self._extract_predictions()
 
-        inner_gate_ring, outer_gate_ring = self._compute_gate_rings(self._gates[2], R.from_quat(self._quat).as_matrix(), 0.1, 0.6, 30)
+        inner_gate_ring, outer_gate_ring = self._compute_gate_rings(self._gates, R.from_quat(self._gates_quat).as_matrix(), 0.1, 0.6, 30)
 
         self.logger.log_step(
             solver_time=(t_end - t_start) * 1e-6,
@@ -209,13 +209,21 @@ class PmmMPC(Controller):
             # self._acados_ocp_solver.set(stage, "lbx", lbx_j)
             # self._acados_ocp_solver.set(stage, "ubx", ubx_j)
 
-            obs1 = self._obstacles[0]
-            obs2 = self._obstacles[1]
-            obs3 = self._obstacles[2]
-            obs4 = self._obstacles[3]
+            n_gates = self._gates.shape[0]
+            n_obs = self._obstacles.shape[0]
 
-            # p = np.hstack([obs1[:2], obs2[:2], obs3[:2], obs4[:2]])
-            p = np.hstack([self._gates[2], obs1[:2], obs2[:2], obs3[:2], obs4[:2]])
+            p = np.zeros(4*n_gates + 2*n_obs)
+
+            # gates
+            for g in range(n_gates):
+                p[4*g:4*g+4] = np.hstack([self._gates[g], self._gates_rpy[g][2]])
+
+            offset = 4*n_gates
+
+            # obstacles
+            for o in range(n_obs):
+                p[offset + 2*o : offset + 2*o + 2] = self._obstacles[o][2:]
+
             self._acados_ocp_solver.set(stage, "p", p)
 
             self._acados_ocp_solver.set(j, "yref", yref[j])
@@ -254,6 +262,7 @@ class PmmMPC(Controller):
         """Update internal state from observations."""
         self._gates = obs.get("gates_pos")
         self._gates_quat = obs.get("gates_quat")
+        self._gates_rpy = R.from_quat(self._gates_quat).as_euler("xyz")
         self._pos = obs.get("pos")
         self._quat = obs.get("quat")
         self._vel = obs.get("vel")
@@ -369,8 +378,11 @@ class PmmMPC(Controller):
             [np.zeros_like(theta), r_o * np.cos(theta), r_o * np.sin(theta)], axis=1
         )
 
+        ring_inner = np.zeros((4, n_pts, 3))
+        ring_outer = np.zeros((4, n_pts, 3))
         # transform to world frame
-        ring_inner = (ring_i_gate.T).T + gate_c
-        ring_outer = (ring_o_gate.T).T + gate_c
+        for i in range(4):
+            ring_inner[i] = (R[i] @ ring_i_gate.T).T + gate_c[i]
+            ring_outer[i] = (R[i] @ ring_o_gate.T).T + gate_c[i]
 
         return ring_inner, ring_outer
