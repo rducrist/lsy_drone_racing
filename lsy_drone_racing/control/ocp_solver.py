@@ -122,7 +122,8 @@ def create_ocp_solver(
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
     # Set obstacle constraints
-    ocp.parameter_values = np.zeros((3,))
+    ocp.parameter_values = np.zeros((11,))
+    
 
     obs_1 = cs.MX.sym("obs_1", 2)
     obs_2 = cs.MX.sym("obs_2", 2)
@@ -134,7 +135,7 @@ def create_ocp_solver(
     r_o = 0.6
 
     # ocp.model.p = cs.vertcat(obs_1, obs_2, obs_3, obs_4)
-    ocp.model.p = gate_c
+    ocp.model.p = cs.vertcat(gate_c, obs_1, obs_2, obs_3, obs_4)
 
     ocp.constraints.constr_type = "BGH"
 
@@ -144,7 +145,7 @@ def create_ocp_solver(
     obs3 =  0.15**2 - (ocp.model.x[0]-obs_3[0])**2 - (ocp.model.x[1]-obs_3[1])**2
     obs4 =  0.15**2 - (ocp.model.x[0]-obs_4[0])**2 - (ocp.model.x[1]-obs_4[1])**2
 
-    # obss = cs.vertcat(obs1, obs2, obs3, obs4)
+    obs_h = cs.vertcat(obs1, obs2, obs3, obs4)
 
     # gates
     dx = ocp.model.x[0] - gate_c[0]
@@ -155,18 +156,20 @@ def create_ocp_solver(
     delta = 0.3  # gate half-thickness / activation range
     weight = delta**2 / (dx*dx + delta**2)
 
-    h = weight* (dist - r_i**2)*(r_o**2 - dist)
+    gate_h = weight* (dist - r_i**2)*(r_o**2 - dist)
 
-    ocp.model.con_h_expr =  h
+    ocp.model.con_h_expr =  cs.vertcat(gate_h, obs_h)
 
-    ocp.constraints.lh = np.array([-1e3])
-    ocp.constraints.uh = np.array([0])
-    ocp.constraints.idxsh = np.array([0])
+    ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3, -1e3])
+    ocp.constraints.uh = np.array([0, 0,0,0, 0])
+    ocp.constraints.idxsh = np.array([0,1,2,3,4])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 5*np.ones((nsbx,))
-    ocp.cost.Zu = 100*np.ones((nsbx,))
+    # ocp.cost.Zu = 100*np.ones((nsbx,))
+    ocp.cost.Zu = np.array([1000,5,5,5,5])
     ocp.cost.zl = 1*np.ones((nsbx,))
-    ocp.cost.zu = 1000*np.ones((nsbx,))
+    # ocp.cost.zu = 1000*np.ones((nsbx,))
+    ocp.cost.zu = np.array([1000,100,100,100, 100])
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))

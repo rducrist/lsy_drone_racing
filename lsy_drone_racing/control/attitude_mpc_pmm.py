@@ -215,7 +215,7 @@ class PmmMPC(Controller):
             obs4 = self._obstacles[3]
 
             # p = np.hstack([obs1[:2], obs2[:2], obs3[:2], obs4[:2]])
-            p = self._gates[2]
+            p = np.hstack([self._gates[2], obs1[:2], obs2[:2], obs3[:2], obs4[:2]])
             self._acados_ocp_solver.set(stage, "p", p)
 
             self._acados_ocp_solver.set(j, "yref", yref[j])
