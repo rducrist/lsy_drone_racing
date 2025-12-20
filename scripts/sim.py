@@ -106,6 +106,7 @@ def simulate(
                     max_size=3.0
                 )
 
+
             if controller.traj_pos_viz is not None:
                 traj = controller.traj_pos_viz
                 speed = np.linalg.norm(controller.traj_vel_viz, axis=1)

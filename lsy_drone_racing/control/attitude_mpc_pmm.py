@@ -41,12 +41,13 @@ class PmmMPC(Controller):
         self._T_HORIZON = 0.7
 
         self._update_obs(obs)
-        self._last_gate_pos = self._gates[self._current_gate_idx].copy()
+        self._last_gate_pos = self._current_gate_pos
+        self._last_gate_idx = self._current_gate_idx
 
         self.corridor = np.array([0.05, 0.05, 0.05])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
         self.gate_influence_radius = 1
-        self._sensor_range = 0.65
+        self._sensor_range = 0.5
 
         self.drone_params = load_params("so_rpy", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
@@ -61,8 +62,8 @@ class PmmMPC(Controller):
         )
 
         # PMM planner
-        self._distance_before = 0.3
-        self._distance_after = 0.3
+        self._distance_before = 0.2
+        self._distance_after = 0.2
         self._generate_gate_waypoints(
             self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
@@ -95,21 +96,28 @@ class PmmMPC(Controller):
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
-        # compute current state
+
+        
+        gate_switched = self._current_gate_idx != self._last_gate_idx
+        gate_moved    = np.linalg.norm(self._current_gate_pos - self._last_gate_pos) > 0.01
+        committed     = np.linalg.norm(self._current_gate_pos - self._pos) < self._sensor_range
+
+
+        if gate_moved and not gate_switched and not committed:
+            self._replan_trajectory()
+
+        self._last_gate_idx = self._current_gate_idx
+        self._last_gate_pos = self._current_gate_pos.copy()
+
+         # compute current state
         i = min(self._tick, self._tick_max)
         if self._tick >= self._tick_max:
             self._finished = True
 
-        dist_to_gate = np.linalg.norm(self._current_gate_pos - self._pos)
-        gate_moved = np.linalg.norm(self._last_gate_pos - self._current_gate_pos) > 0.001
-        entered_sensor_range = dist_to_gate < self._sensor_range
-
-        if gate_moved and entered_sensor_range:
-            self._replan_trajectory()
-
         # Build horizon references
         yref, yref_e, x_guess = self._build_references(i)
 
+    
         # Apply corridor constraints and warm-starts
         self._apply_constraints(i, yref, yref_e, x_guess)
 
@@ -120,12 +128,16 @@ class PmmMPC(Controller):
 
         predictions = self._extract_predictions()
 
+        inner_gate_ring, outer_gate_ring = self._compute_gate_rings(self._gates, R.from_quat(self._gates_quat).as_matrix(), 0.1, 0.6, 30)
+
         self.logger.log_step(
             solver_time=(t_end - t_start) * 1e-6,
             cost=cost,
             predictions=predictions,
             state=self._pos,
-            control=u0
+            control=u0,
+            gate_inner_ring = inner_gate_ring,
+            gate_outer_ring=outer_gate_ring
         )
         return u0
 
@@ -145,7 +157,7 @@ class PmmMPC(Controller):
     def episode_callback(self):
         """What has to be called at the end of episode."""
         # self.plotter.plot_solver_times()
-        # self.plotter.plot_costs()
+        self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
 
@@ -158,7 +170,6 @@ class PmmMPC(Controller):
         preds = np.asarray(preds)
         return preds
 
-
     def _solve_mpc(self) -> tuple[NDArray[np.floating], np.floating]:
         self._acados_ocp_solver.solve()
 
@@ -167,9 +178,12 @@ class PmmMPC(Controller):
 
         return u0, cost
 
-
     def _apply_constraints(
-        self, i: int, yref: NDArray[np.floating], yref_e: NDArray[np.floating], x_guess: NDArray[np.floating]
+        self,
+        i: int,
+        yref: NDArray[np.floating],
+        yref_e: NDArray[np.floating],
+        x_guess: NDArray[np.floating],
     ) -> None:
         """Apply corridor constraints and initialize yref / x_guess in the solver."""
         dist_to_gate = np.linalg.norm(self._current_gate_pos - self._pos)
@@ -192,15 +206,24 @@ class PmmMPC(Controller):
             # ubx_j[:3] = self._current_gate_pos + corridor
 
             # if stage <= self._N - 1:
-                # self._acados_ocp_solver.set(stage, "lbx", lbx_j)
-                # self._acados_ocp_solver.set(stage, "ubx", ubx_j)
-            
-            obs1 = self._obstacles[0]
-            obs2 = self._obstacles[1]
-            obs3 = self._obstacles[2]
-            obs4 = self._obstacles[3]
+            # self._acados_ocp_solver.set(stage, "lbx", lbx_j)
+            # self._acados_ocp_solver.set(stage, "ubx", ubx_j)
 
-            p = np.hstack([obs1[:2], obs2[:2], obs3[:2], obs4[:2]])
+            n_gates = self._gates.shape[0]
+            n_obs = self._obstacles.shape[0]
+
+            p = np.zeros(4*n_gates + 2*n_obs)
+
+            # gates
+            for g in range(n_gates):
+                p[4*g:4*g+4] = np.hstack([self._gates[g], self._gates_rpy[g][2]])
+
+            offset = 4*n_gates
+
+            # obstacles
+            for o in range(n_obs):
+                p[offset + 2*o : offset + 2*o + 2] = self._obstacles[o][2:]
+
             self._acados_ocp_solver.set(stage, "p", p)
 
             self._acados_ocp_solver.set(j, "yref", yref[j])
@@ -214,6 +237,7 @@ class PmmMPC(Controller):
     ) -> tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
         """Build yref, terminal yref_e, and warm-start x_guess."""
         pos_des = self._p_pmm[i : i + self._N]
+        
         vel_des = self._v_pmm[i : i + self._N]
 
         # Stage references
@@ -238,6 +262,7 @@ class PmmMPC(Controller):
         """Update internal state from observations."""
         self._gates = obs.get("gates_pos")
         self._gates_quat = obs.get("gates_quat")
+        self._gates_rpy = R.from_quat(self._gates_quat).as_euler("xyz")
         self._pos = obs.get("pos")
         self._quat = obs.get("quat")
         self._vel = obs.get("vel")
@@ -312,7 +337,7 @@ class PmmMPC(Controller):
         self._generate_gate_waypoints(
             self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
-        self._start_vel = self._vel
+        self._start_vel = self._vel.copy()
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
         # Update visualization
@@ -324,4 +349,40 @@ class PmmMPC(Controller):
         self._tick_max = max(0, len(self._t_pmm) - 1 - self._N)
 
         # Remember last gate position
-        self._last_gate_pos = self._current_gate_pos.copy()
+        self._last_current_gate_pos = self._current_gate_pos.copy()
+
+    def _compute_gate_rings(self, gate_c, R, r_i, r_o, n_pts=60) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        """Compute inner and outer annulus rings of a gate in world frame.
+
+        Args:
+            gate_c (array-like, shape (3,)):
+                Gate center in world coordinates
+            R (array-like, shape (3,3)):
+                Rotation matrix from gate frame -> world frame
+                (columns are gate-frame axes in world frame)
+            r_i (float):
+                Inner radius
+            r_o (float):
+                Outer radius
+            n_pts (int):
+                Number of points per ring
+        """
+        theta = np.linspace(0.0, 2.0 * np.pi, n_pts)
+
+        # gate-frame points (X axis is normal to gate plane)
+        ring_i_gate = np.stack(
+            [np.zeros_like(theta), r_i * np.cos(theta), r_i * np.sin(theta)], axis=1
+        )
+
+        ring_o_gate = np.stack(
+            [np.zeros_like(theta), r_o * np.cos(theta), r_o * np.sin(theta)], axis=1
+        )
+
+        ring_inner = np.zeros((4, n_pts, 3))
+        ring_outer = np.zeros((4, n_pts, 3))
+        # transform to world frame
+        for i in range(4):
+            ring_inner[i] = (R[i] @ ring_i_gate.T).T + gate_c[i]
+            ring_outer[i] = (R[i] @ ring_o_gate.T).T + gate_c[i]
+
+        return ring_inner, ring_outer

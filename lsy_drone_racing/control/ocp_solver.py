@@ -5,7 +5,7 @@ from __future__ import annotations  # Python 3.10 type hints
 import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from drone_models.so_rpy import symbolic_dynamics_euler_mpcc
+from lsy_drone_racing.control.mpcc_model import symbolic_dynamics_euler_mpcc
 import casadi as cs
 
 
