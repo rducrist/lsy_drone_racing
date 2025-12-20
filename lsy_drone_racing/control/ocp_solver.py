@@ -129,16 +129,16 @@ def create_ocp_solver(
     # ----------- Constraint formulation ---------------
 
     # Set State Constraints (rpy < 30°)
-    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.8, -0.8, -0.8])
-    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.8, 0.8, 0.8])
+    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.9, -0.9, -0.9])
+    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.9, 0.9, 0.9])
     ocp.constraints.idxbx = np.array([0, 1, 2, 3, 4, 5])
 
     # Set Input Constraints 
     # (rpy < 30°) and (thrust within physical limits) and (dvtheta_cmd limits)
-    dvtheta_min = -5.0
-    dvtheta_max =  5.0
-    ocp.constraints.lbu = np.array([-0.7, -0.7, -0.7, parameters["thrust_min"] * 4, dvtheta_min])
-    ocp.constraints.ubu = np.array([0.8, 0.8, 0.8, parameters["thrust_max"] * 4, dvtheta_max])
+    dvtheta_min = -8.0
+    dvtheta_max =  8.0
+    ocp.constraints.lbu = np.array([-0.9, -0.9, -0.9, parameters["thrust_min"] * 4, dvtheta_min])
+    ocp.constraints.ubu = np.array([0.9, 0.9, 0.9, parameters["thrust_max"] * 4, dvtheta_max])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
 
@@ -157,11 +157,11 @@ def create_ocp_solver(
     ocp.constraints.x0 = np.zeros((nx))
 
     # Solver Options
-    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
+    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
     ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
-    ocp.solver_options.tol = 1e-6
+    ocp.solver_options.tol = 1e-4
 
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1

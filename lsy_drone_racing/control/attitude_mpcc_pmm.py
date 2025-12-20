@@ -43,7 +43,7 @@ class PmmMPC(Controller):
         self._update_obs(obs)
         self._last_gate_pos = self._gates[self._current_gate_idx].copy()
 
-        self.corridor = np.array([0.1, 0.1, 0.1])
+        self.corridor = np.array([0.05, 0.05, 0.05])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
         self.gate_influence_radius = 1
         self._sensor_range = 0.65
@@ -91,9 +91,9 @@ class PmmMPC(Controller):
         self._config = config
 
         # MPCC weights (used in parameter p[j, 6:9])
-        self._qc = 60.0
-        self._ql = 80.0
-        self._mu = 1.3
+        self._qc = 200.0
+        self._ql = 150.0
+        self._mu = 1.2
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
@@ -380,7 +380,7 @@ class PmmMPC(Controller):
         """Generate a set of waypoints for each gate starting from the current gate index."""
         waypoints = [start_pos.copy()]  # start at drone
         n_gates = len(self._gates)
-        short_after = 0.2           # 0.1 m hinter dem Gate
+        short_after = 0.2          # 0.1 m hinter dem Gate
         for i in range(start_gate_idx, n_gates):
             gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
