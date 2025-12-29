@@ -32,7 +32,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     model.u = U
 
     #MPCC Parameters
-    p = cs.MX.sym("p", 17) #für MPCC 9 + 8 (4 Hindernisse mit je 2D Position)
+    p = cs.MX.sym("p", 33) #für MPCC 9 + 8 (4 Hindernisse mit je 2D Position) + 16 (4 Gates mit je 4 Werten)
     model.p = p
     
     p_ref = p[0:3]
@@ -46,6 +46,10 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     obs_2 = p[11:13]
     obs_3 = p[13:15]
     obs_4 = p[15:17]
+
+    # ---- Gate-Teil ----------------------------
+    # gates liegen in p[17:33] = 16 Werte = 4 Gates * (gx, gy, gz, yaw)
+    gates = p[17:33]
 
     #Extract variables from state / input 
     pos    = X[0:3]
@@ -91,7 +95,43 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     r3 = 0.15**2 - ( (pos[0]-obs_3[0])**2 + (pos[1]-obs_3[1])**2 )
     r4 = 0.15**2 - ( (pos[0]-obs_4[0])**2 + (pos[1]-obs_4[1])**2 )
 
-    model.con_h_expr = cs.vertcat(r1, r2, r3, r4)
+    # Gate-Constraints (inside inner OR outside outer)
+    r_i = 0.10   # inner radius
+    r_o = 0.60   # outer radius
+    delta_gate = 0.30  # activation thickness along gate normal
+
+    gate_h_list = []
+    for i in range(4):
+        base = 4 * i
+        gx = gates[base + 0]
+        gy = gates[base + 1]
+        gz = gates[base + 2]
+        psi = gates[base + 3]   # yaw
+
+        dx_w = pos[0] - gx
+        dy_w = pos[1] - gy
+        dz_w = pos[2] - gz
+
+        c = cs.cos(psi)
+        s = cs.sin(psi)
+
+        # world -> gate frame (yaw-only wie im MPC)
+        dx_g =  c * dx_w + s * dy_w
+        dy_g = -s * dx_w + c * dy_w
+        dz_g =  dz_w
+
+        dist = dy_g*dy_g + dz_g*dz_g   # radius^2 in gate plane (y-z)
+
+        # activate mainly near gate plane (dx_g ~ 0)
+        w = (delta_gate**2) / (dx_g*dx_g + delta_gate**2)
+
+        # ODER-Constraint: inside inner OR outside outer (never in between)
+        h_gate = w * (dist - r_i**2) * (r_o**2 - dist)
+        gate_h_list.append(h_gate)
+
+    gate_h = cs.vertcat(*gate_h_list)
+
+    model.con_h_expr = cs.vertcat(r1, r2, r3, r4, gate_h)
 
     return model
 
@@ -108,7 +148,7 @@ def create_ocp_solver(
     # Get Dimensions
     nx = ocp.model.x.rows() # 14
     nu = ocp.model.u.rows() # 5
-    np_param = ocp.model.p.rows() # 17
+    np_param = ocp.model.p.rows() # 33
     
     ocp.dims.np= np_param
     ocp.parameter_values = np.zeros((np_param,))
@@ -144,14 +184,15 @@ def create_ocp_solver(
 
     # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
     ocp.constraints.constr_type = "BGH"
-    ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3])
-    ocp.constraints.uh = np.array([0.0, 0.0, 0.0, 0.0])
-    ocp.constraints.idxsh = np.array([0, 1, 2, 3])
+    ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3, -1e1, -1e1, -1e1, -1e1])
+    ocp.constraints.uh = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    ocp.constraints.idxsh = np.array([0, 1, 2, 3, 4, 5, 6, 7])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 5 * np.ones((nsbx,))
     ocp.cost.Zu = 5 * np.ones((nsbx,))
     ocp.cost.zl = 1 * np.ones((nsbx,))
-    ocp.cost.zu = 350 * np.ones((nsbx,))
+    #ocp.cost.zu = 350 * np.ones((nsbx,))
+    ocp.cost.zu = np.array([350,350,350,350,  1000,1000,1000,1000], dtype=float)
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))

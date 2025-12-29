@@ -71,8 +71,8 @@ class PmmMPC(Controller):
         self._last_vtheta = 0.0
 
         # PMM planner
-        self._distance_before = 0.15
-        self._distance_after = 0.15
+        self._distance_before = 0.3
+        self._distance_after = 0.3
         self._generate_gate_waypoints(
             self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
@@ -249,12 +249,12 @@ class PmmMPC(Controller):
         """
         Build per-stage MPCC parameter vectors
 
-            p_j = [p_ref(3), t_ref(3), qc, ql, mu, obs_1(2), obs_2(2), obs_3(2), obs_4(2)]
-                 ∈ ℝ¹⁷
+            p_j = [p_ref(3), t_ref(3), qc, ql, mu, obs_1(2), obs_2(2), obs_3(2), obs_4(2), gate_1(4), gate_2(4), gate_3(4), gate_4(4)]
+                 ∈ ℝ^33
 
         using theta0, vtheta0 and the PMM path and the current obstacle positions.
         """            
-        p_horizon = np.zeros((self._N, 17))
+        p_horizon = np.zeros((self._N, 33))
 
         for j in range(self._N):
             s_j = theta0 + j * vtheta0 * self._dt
@@ -267,14 +267,25 @@ class PmmMPC(Controller):
             p_horizon[j, 8]   = self._mu       # mu
 
         # --- Obstacle-Teil: 8 Einträge, für alle Stages gleich ---
+
         # self._obstacles: shape (4, 3) → wir nehmen nur (x, y)
         obs_xy = np.zeros(8)
         num_obs = min(4, len(self._obstacles))
         for k in range(num_obs):
             obs_xy[2 * k : 2 * k + 2] = self._obstacles[k][:2]
-
-        # dieselben Obstacle-Parameter für alle Stages
+        
         p_horizon[:, 9:17] = obs_xy[None, :]
+
+            
+        # gates: (gx,gy,gz,yaw) für 4 gates
+        gate_pack = np.zeros(4*4)
+        for i in range(4):
+            gpos = self._gates[i]
+            # yaw aus quat (xyz-euler, index 2)
+            yaw = float(R.from_quat(self._gates_quat[i]).as_euler("xyz")[2])
+            gate_pack[4*i:4*i+4] = [gpos[0], gpos[1], gpos[2], yaw]
+
+        p_horizon[:, 17:33] = gate_pack[None, :]
 
         return p_horizon
     
@@ -414,8 +425,10 @@ class PmmMPC(Controller):
         distance_before: float,
         distance_after: float,
     ) -> None:
-        """Generate a set of waypoints for each gate starting from the current gate index."""
+        """This function generates a set of waypoints for each gate starting from current gate index."""
         waypoints = [start_pos.copy()]  # start at drone
+            
+        # validate start_gate_idx   
         n_gates = len(self._gates)
         short_after = 0.2          # 0.1 m hinter dem Gate
         for i in range(start_gate_idx, n_gates):
@@ -460,10 +473,7 @@ class PmmMPC(Controller):
     def _replan_trajectory(self) -> None:
         """Re-generate PMM trajectory when gates move."""
         self._generate_gate_waypoints(
-            self._pos,
-            self._current_gate_idx,
-            self._distance_before,
-            self._distance_after
+            self._pos,self._current_gate_idx, self._distance_before, self._distance_after
         )
         self._start_vel = self._vel
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
@@ -495,15 +505,15 @@ class PmmMPC(Controller):
             n_pts (int):
                 Number of points per ring
         """
-        theta = np.linspace(0.0, 2.0 * np.pi, n_pts)
+        beta = np.linspace(0.0, 2.0 * np.pi, n_pts)
 
         # gate-frame points (X axis is normal to gate plane)
         ring_i_gate = np.stack(
-            [np.zeros_like(theta), r_i * np.cos(theta), r_i * np.sin(theta)], axis=1
+            [np.zeros_like(beta), r_i * np.cos(beta), r_i * np.sin(beta)], axis=1
         )
 
         ring_o_gate = np.stack(
-            [np.zeros_like(theta), r_o * np.cos(theta), r_o * np.sin(theta)], axis=1
+            [np.zeros_like(beta), r_o * np.cos(beta), r_o * np.sin(beta)], axis=1
         )
 
         ring_inner = np.zeros((4, n_pts, 3))
