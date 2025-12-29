@@ -46,7 +46,11 @@ class PmmMPC(Controller):
         self.corridor = np.array([0.05, 0.05, 0.05])
         self.corridor_default = np.array([10.0, 10.0, 10.0])
         self.gate_influence_radius = 1
-        self._sensor_range = 0.65
+        self._sensor_range = 0.5
+
+        self._gate_locked = [False] * len(self._gates)   # oder len(self._gates_nom) / track.gates
+        self._last_replanned_gate_idx = -1               # optional
+        self._just_replanned = False   
 
         self.drone_params = load_params("so_rpy", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
@@ -67,8 +71,8 @@ class PmmMPC(Controller):
         self._last_vtheta = 0.0
 
         # PMM planner
-        self._distance_before = 0.3
-        self._distance_after = 0.3
+        self._distance_before = 0.15
+        self._distance_after = 0.15
         self._generate_gate_waypoints(
             self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
@@ -91,53 +95,76 @@ class PmmMPC(Controller):
         self._config = config
 
         # MPCC weights (used in parameter p[j, 6:9])
-        self._qc = 200.0
+        self._qc = 300.0
         self._ql = 150.0
-        self._mu = 1.2
+        self._mu = 1.5
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Computes the control."""
         self._update_obs(obs)
-    
-        # Initial progress state based on closest point on PMM path
-        s_cur, _ = self._project_on_pmm_path(self._pos)
-        p_ref, t_ref = self._pos_and_tangent_from_s(s_cur)
-        v_par = float(np.dot(self._vel, t_ref))  # Projektion
-        #Variante A:
-        if self._tick == 0:
-            theta0 = s_cur
-            vtheta0 = max(0.1, np.linalg.norm(self._vel))
-        else:
-            theta0 = self._last_theta
-            vtheta0 = self._last_vtheta
-        #Variante B:
-        # if self._tick == 0 or self._just_replanned:
-        #     theta0 = s_cur
-        #     vtheta0 = np.clip(v_par, 0.1, 1.0)   # sanft clampen
-        #     self._just_replanned = False
-        # else:
-        #     theta0 = self._last_theta
-        #     vtheta0 = self._last_vtheta
 
-        # Set initial state x0 for OCP
-        x0 = np.concatenate((self._pos, self._rpy, self._vel, self._drpy, np.array([theta0, vtheta0])))
-        self._acados_ocp_solver.set(0, "lbx", x0)
-        self._acados_ocp_solver.set(0, "ubx", x0)
-
-        # # compute current state
-        # i = min(self._tick, self._tick_max)
-        # if self._tick >= self._tick_max:
-        #     self._finished = True
 
         dist_to_gate = np.linalg.norm(self._current_gate_pos - self._pos)
         gate_moved = np.linalg.norm(self._last_gate_pos - self._current_gate_pos) > 0.001
         entered_sensor_range = dist_to_gate < self._sensor_range
 
-        # if gate_moved and entered_sensor_range:
-        #     self._replan_trajectory()
+        i = self._current_gate_idx
 
+        if entered_sensor_range and (not self._gate_locked[i]):
+            # Lock gate pose ONCE
+            self._gate_locked[i] = True
+
+            # (Optional) freeze the measured pose for the rest of the run
+            self._locked_gate_pos = self._current_gate_pos.copy()   # oder array pro gate
+
+            # Replan ONCE
+            self._replan_trajectory()
+
+            # Mark that we must reset theta/vtheta based on NEW path
+            self._just_replanned = True
+    
+        # # Initial progress state based on closest point on PMM path
+        # s_cur, _ = self._project_on_pmm_path(self._pos)
+        # p_ref, t_ref = self._pos_and_tangent_from_s(s_cur)
+        # v_par = float(np.dot(self._vel, t_ref))  # Projektion
+
+        # if self._tick == 0:
+        #     theta0 = s_cur
+        #     #vtheta0 = max(0.1, np.linalg.norm(self._vel))
+        #     vtheta0 = max(0.1, 0.5)
+        # else:
+        #     theta0 = self._last_theta
+        #     vtheta0 = self._last_vtheta
+        
+        # project on CURRENT (possibly replanned) PMM
+        s_cur, _ = self._project_on_pmm_path(self._pos)
+        _, t_ref = self._pos_and_tangent_from_s(s_cur)
+        v_par = float(np.dot(self._vel, t_ref))
+
+        if self._tick == 0 or self._just_replanned:
+            # hard re-init after replan
+            theta0 = float(s_cur)
+
+            # estimated vtheta from velocity projection (optional)
+            vtheta_est = float(np.clip(v_par, 0.1, 1.0))  # keep your bounds
+
+            # HARD CAP based on NEW path length:
+            vtheta_cap = 0.4 * float(self._s_total) / max(self._N * self._dt, 1e-6)
+
+            vtheta0 = float(min(vtheta_est, vtheta_cap))
+
+            self._just_replanned = False
+        else:
+            theta0 = float(self._last_theta)
+            vtheta0 = float(self._last_vtheta)
+
+
+        # Set initial state x0 for OCP
+        x0 = np.concatenate((self._pos, self._rpy, self._vel, self._drpy, np.array([theta0, vtheta0])))
+        self._acados_ocp_solver.set(0, "lbx", x0)
+        self._acados_ocp_solver.set(0, "ubx", x0)
 
         # Build MPCC parameter horizon & warm-start states
         p_horizon = self._build_mpcc_parameters(theta0, vtheta0)
@@ -147,7 +174,7 @@ class PmmMPC(Controller):
         self._apply_constraints(p_horizon, x_guess)
 
 
-        # Solve MPC
+        # Solve MPCC
         t_start = time.perf_counter_ns()
         u0, cost = self._solve_mpc()
         t_end = time.perf_counter_ns()
@@ -159,12 +186,19 @@ class PmmMPC(Controller):
 
         predictions = self._extract_predictions()
 
+        inner_gate_ring, outer_gate_ring = self._compute_gate_rings(
+            self._gates,
+            R.from_quat(self._gates_quat).as_matrix(),
+            0.1, 0.6, 30
+        )
         self.logger.log_step(
             solver_time=(t_end - t_start) * 1e-6,
             cost=cost,
             predictions=predictions,
             state=self._pos,
-            control=u0
+            control=u0,
+            gate_inner_ring=inner_gate_ring,
+            gate_outer_ring=outer_gate_ring
         )
         self.last_u = u0.copy()
         # print(f"theta0={theta0:.3f}, vtheta0={vtheta0:.3f}, u0={u0}")
@@ -323,8 +357,10 @@ class PmmMPC(Controller):
         }
         planner_config_file = "./pmm_uav_planner/config/planner/crazyflie.yaml"
         traj = plan_pmm_trajectory(waypoints_config, planner_config_file)
+        
         t_s, p_s, v_s, a_s = traj.get_sampled_trajectory(sampling_period)
         t_s, p_s, v_s, a_s = np.array(t_s), np.array(p_s), np.array(v_s), np.array(a_s)
+        
         self._t_pmm = t_s
         self._p_pmm = p_s
         self._v_pmm = v_s
@@ -335,6 +371,7 @@ class PmmMPC(Controller):
         seg_lens = np.linalg.norm(diffs, axis=1)
         self._s_pmm = np.concatenate(([0.0], np.cumsum(seg_lens)))
         self._s_total = float(self._s_pmm[-1])
+        
         self.traj_pos_viz = self._p_pmm[::5]
         self.traj_vel_viz = self._v_pmm[::5]
 
@@ -393,27 +430,27 @@ class PmmMPC(Controller):
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
 
-             # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
-            if i == 2: 
-                # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
-                wp_after_short = gate_pos + short_after * gate_forward
-                waypoints.append(wp_after_short)
+            #  # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
+            # if i == 2: 
+            #     # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
+            #     wp_after_short = gate_pos + short_after * gate_forward
+            #     waypoints.append(wp_after_short)
 
-                # 2) zurück zum Gate 3 (wieder durch’s Gate)
-                waypoints.append(gate_pos)
+            #     # # 2) zurück zum Gate 3 (wieder durch’s Gate)
+            #     # waypoints.append(gate_pos)
 
-                # 3) wieder vor Gate 3 (Richtung Gate 4 ausrichten)
-                waypoints.append(wp_before)
-                # Instead of wp_after, go directly to BEFORE Gate 4
-                if i + 1 < n_gates:
-                    next_gate_pos = self._gates[i+1]
-                    next_gate_quat = self._gates_quat[i+1]
-                    R_next = R.from_quat(next_gate_quat).as_matrix()
-                    next_forward = R_next[:, 0]
+            #     # 3) wieder vor Gate 3 (Richtung Gate 4 ausrichten)
+            #     waypoints.append(gate_pos - short_after * wp_before)
+            #     # Instead of wp_after, go directly to BEFORE Gate 4
+            #     if i + 1 < n_gates:
+            #         next_gate_pos = self._gates[i+1]
+            #         next_gate_quat = self._gates_quat[i+1]
+            #         R_next = R.from_quat(next_gate_quat).as_matrix()
+            #         next_forward = R_next[:, 0]
 
-                    next_wp_before = next_gate_pos - distance_before * next_forward
-                    waypoints.append(next_wp_before)
-                continue  # skip the normal wp_after
+            #         next_wp_before = next_gate_pos - distance_before * next_forward
+            #         waypoints.append(next_wp_before)
+            #     continue  # skip the normal wp_after
 
         # Otherwise: add normal AFTER waypoint
             waypoints.append(wp_after)
@@ -441,3 +478,39 @@ class PmmMPC(Controller):
 
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
+
+    def _compute_gate_rings(self, gate_c, R, r_i, r_o, n_pts=60) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        """Compute inner and outer annulus rings of a gate in world frame.
+
+        Args:
+            gate_c (array-like, shape (3,)):
+                Gate center in world coordinates
+            R (array-like, shape (3,3)):
+                Rotation matrix from gate frame -> world frame
+                (columns are gate-frame axes in world frame)
+            r_i (float):
+                Inner radius
+            r_o (float):
+                Outer radius
+            n_pts (int):
+                Number of points per ring
+        """
+        theta = np.linspace(0.0, 2.0 * np.pi, n_pts)
+
+        # gate-frame points (X axis is normal to gate plane)
+        ring_i_gate = np.stack(
+            [np.zeros_like(theta), r_i * np.cos(theta), r_i * np.sin(theta)], axis=1
+        )
+
+        ring_o_gate = np.stack(
+            [np.zeros_like(theta), r_o * np.cos(theta), r_o * np.sin(theta)], axis=1
+        )
+
+        ring_inner = np.zeros((4, n_pts, 3))
+        ring_outer = np.zeros((4, n_pts, 3))
+        # transform to world frame
+        for i in range(4):
+            ring_inner[i] = (R[i] @ ring_i_gate.T).T + gate_c[i]
+            ring_outer[i] = (R[i] @ ring_o_gate.T).T + gate_c[i]
+
+        return ring_inner, ring_outer
