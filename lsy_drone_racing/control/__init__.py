@@ -15,4 +15,5 @@ To give you an idea of what you need to do, we also include some example impleme
 
 from lsy_drone_racing.control.controller import Controller
 
+
 __all__ = ["Controller"]

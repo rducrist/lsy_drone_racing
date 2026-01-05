@@ -312,3 +312,5 @@ def generate_random_track(
         o["pos"][:2] = obstacles_final[i, :2].tolist()
 
     return track
+
+    

@@ -20,6 +20,7 @@ import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 
 from lsy_drone_racing.utils import load_config, load_controller
+from lsy_drone_racing.utils.utils import draw_line
 
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def simulate(
-    config: str = "level0.toml",
+    config: str = "level2.toml",
     controller: str | None = None,
     n_runs: int = 1,
     render: bool | None = None,
@@ -95,6 +96,61 @@ def simulate(
             controller_finished = controller.step_callback(
                 action, obs, reward, terminated, truncated, info
             )
+
+            if controller.logger.current_prediction is not None:
+                draw_line(
+                    env=env.unwrapped,
+                    points=controller.logger.current_prediction,
+                    rgba=np.array([0.0,0.3,1.0,0.7]),
+                    min_size=2.0,
+                    max_size=3.0
+                )
+
+            if controller.traj_pos_viz is not None:
+                traj = controller.traj_pos_viz
+                speed = np.linalg.norm(controller.traj_vel_viz, axis=1)
+
+                # normalize speed
+                v_min, v_max = speed.min(), speed.max()
+                norm_speed = (speed - v_min) / (v_max - v_min + 1e-6)
+
+                # color map slow->green, fast->red
+                rgba_colors = np.zeros((len(speed), 4))
+                rgba_colors[:, 0] = norm_speed
+                rgba_colors[:, 1] = 1 - norm_speed
+                rgba_colors[:, 3] = 1.0
+
+                # draw each segment with its own color
+                for k in range(len(traj) - 1):
+                    seg = np.stack([traj[k], traj[k + 1]], axis=0)
+                    draw_line(
+                        env=env.unwrapped,
+                        points=seg,
+                        rgba=rgba_colors[k],
+                        min_size=2.0,
+                        max_size=3.0
+                    )   
+
+                if controller.logger.gate_inner_ring is not None:
+                    for j in range(4):
+                        draw_line(
+                            env=env.unwrapped,
+                            points=controller.logger.gate_inner_ring[j],
+                            rgba=np.array([1.0, 0.0, 0.0, 0.7]),
+                            min_size=2.0,
+                            max_size=3.0
+                        )
+                if controller.logger.gate_outer_ring is not None:
+                    for j in range(4):
+                        draw_line(
+                            env=env.unwrapped,
+                            points=controller.logger.gate_outer_ring[j],
+                            rgba=np.array([1.0, 0.0, 0.0, 0.7]),
+                            min_size=2.0,
+                            max_size=3.0
+                        )
+
+
             # Add up reward, collisions
             if terminated or truncated or controller_finished:
                 break

@@ -130,7 +130,8 @@ rosdep = "*"
 scripts = ["tools/setup_mocap.sh"]
 
 [tool.pixi.activation]
-scripts = ["tools/setup_acados.sh"]
+scripts = ["tools/setup_acados.sh", 
+           "tools/setup_pmm_planner.sh"]
 
 # feature[online-submission]
 # [tool.pixi.feature.online-submission]
@@ -179,3 +180,6 @@ pip = ">=25.0.1,<26"
 cmake = "*"
 compilers = ">=1.9.0, <1.11.0"
 make = "*"
+pybind11 = ">=3.0.1,<4"
+eigen = ">=3.4.0,<4"
+yaml-cpp = ">=0.8.0,<0.9"
