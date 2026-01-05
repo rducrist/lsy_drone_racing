@@ -35,10 +35,10 @@ class PmmMPC(Controller):
         super().__init__(obs, info, config)
         self._env_id = config.env.id
 
-        self._N = 35
-        self._dt = 1 / config.env.freq
+        self._N = 20
+        self._dt = 1 / (config.env.freq)
         # self._T_HORIZON = self._N * self._dt
-        self._T_HORIZON = 0.6
+        self._T_HORIZON = 1.0
 
         self._update_obs(obs)
         self._last_gate_pos = self._current_gate_pos

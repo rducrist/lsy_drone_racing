@@ -135,21 +135,21 @@ def create_ocp_solver(
     ocp.parameter_values = np.zeros((4*n_gates + 2*n_obs))
 
     # obstacles 
-    r_obs = 0.1
+    r_obs = 0.2
     obs_h_list = []
 
     for i in range(n_obs):
         dx = ocp.model.x[0] - obs_c[0, i]
         dy = ocp.model.x[1] - obs_c[1, i]
-        dist = dx**2 + dy**2 
-        h_obs = (r_obs**2 - dist) / r_obs
+        dist = cs.sqrt(dx**2 + dy**2 )
+        h_obs = (r_obs - dist) / r_obs
         obs_h_list.append(h_obs)
 
     obs_h = cs.vertcat(*obs_h_list)
     
     # gates 
     r_i = 0.1
-    r_o = 0.5
+    r_o = 0.6
     gate_scale = r_o - r_i
     # Activation parameters
     activation_x = 0.2  # Activate ±1.5m from gate plane
@@ -179,7 +179,7 @@ def create_ocp_solver(
         dz_g = dz_w
 
          # Distance from gate center axis
-        r = cs.sqrt(dy_g**2 + dz_g**2 + 1e-6)
+        r = dy_g**2 + dz_g**2 
 
         # Activation: near gate plane AND near gate axis
         weight_x = activation_x**2 / (dx_g**2 + activation_x**2)
@@ -187,7 +187,7 @@ def create_ocp_solver(
         weight = weight_x * weight_r
 
         # Normalized complementarity form
-        h_gate = weight * (r - r_i) * (r_o - r) / gate_scale**2
+        h_gate = weight * (r - r_i**2) * (r_o**2 - r) / gate_scale**2
         
         gate_h_list.append(h_gate)
 
@@ -207,25 +207,28 @@ def create_ocp_solver(
     ocp.constraints.idxsh = np.arange(nh)
 
     ocp.cost.Zl = 0 * np.ones(nh)
-    ocp.cost.Zu = np.array([1500]*n_gates + [1000]*n_obs)
+    ocp.cost.Zu = np.array([5000]*n_gates + [800]*n_obs)
     ocp.cost.zl = 0 * np.ones(nh)
-    ocp.cost.zu = np.array([5]*n_gates + [5]*n_obs)
+    ocp.cost.zu = np.array([10]*n_gates + [10]*n_obs)
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
 
     # Solver Options
-    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
+    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
     ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
-    ocp.solver_options.tol = 1e-6
+    ocp.solver_options.tol = 1e-4
 
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
 
-    ocp.solver_options.qp_solver_iter_max = 20
-    ocp.solver_options.nlp_solver_max_iter = 50
+    ocp.solver_options.qp_solver_iter_max = 50
+    ocp.solver_options.nlp_solver_max_iter = 100
+
+    ocp.solver_options.regularize_method = "CONVEXIFY"
+    ocp.solver_options.globalization_line_search_use_sufficient_descent = 1
 
     # set prediction horizon
     ocp.solver_options.tf = Tf
