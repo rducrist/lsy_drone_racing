@@ -329,7 +329,12 @@ class PmmMPC(Controller):
         self._last_current_gate_pos = self._current_gate_pos.copy()
 
     def _compute_gate_rings(
-        self, gate_c, R, r_i, r_o, n_pts=60
+        self,
+        gate_c: NDArray[np.floating],
+        R: NDArray[np.floating],
+        r_i: np.floating,
+        r_o: np.floating,
+        n_pts: int = 60,
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """Compute inner and outer annulus rings of a gate in world frame.
 

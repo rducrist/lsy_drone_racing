@@ -2,11 +2,11 @@
 
 from __future__ import annotations  # Python 3.10 type hints
 
+import casadi as cs
 import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from drone_models.so_rpy import symbolic_dynamics_euler
-import casadi as cs
 
 
 def create_acados_model(parameters: dict) -> AcadosModel:
@@ -151,7 +151,6 @@ def create_ocp_solver(
     r_i = 0.1
     r_o = 0.5
     gate_scale = r_o - r_i
-    delta = 1.0
     # Activation parameters
     activation_x = 0.2  # Activate ±1.5m from gate plane
     activation_r = 0.5  # Activate within 1m of gate center axis
