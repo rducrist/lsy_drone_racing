@@ -135,21 +135,26 @@ def create_ocp_solver(
     ocp.parameter_values = np.zeros((4*n_gates + 2*n_obs,))
 
     # obstacles 
-    r_obs = 0.15
+    r_obs = 0.4
     obs_h_list = []
 
     for i in range(n_obs):
         dx = ocp.model.x[0] - obs_c[0, i]
         dy = ocp.model.x[1] - obs_c[1, i]
-        h_obs = r_obs**2 - dx*dx - dy*dy
+        dist = cs.sqrt(dx**2 + dy**2 + 1e-6)
+        h_obs = (r_obs - dist) / r_obs
         obs_h_list.append(h_obs)
 
     obs_h = cs.vertcat(*obs_h_list)
     
     # gates 
     r_i = 0.1
-    r_o = 0.6
-    delta = 0.3
+    r_o = 0.5
+    gate_scale = r_o - r_i
+    delta = 1.0
+    # Activation parameters
+    activation_x = 0.2  # Activate ±1.5m from gate plane
+    activation_r = 0.5  # Activate within 1m of gate center axis
 
     gate_h_list = []
 
@@ -174,13 +179,17 @@ def create_ocp_solver(
         dy_g = -sin_psi * dx_w + cos_psi * dy_w
         dz_g = dz_w
 
-        # gate geometry (circle in y–z plane)
-        dist = dy_g*dy_g + dz_g*dz_g
+         # Distance from gate center axis
+        r = cs.sqrt(dy_g**2 + dz_g**2 + 1e-6)
 
-        # activation along gate normal (x_g axis)
-        weight = delta**2 / (dx_g*dx_g + delta**2)
+        # Activation: near gate plane AND near gate axis
+        weight_x = activation_x**2 / (dx_g**2 + activation_x**2)
+        weight_r = activation_r**2 / (r**2 + activation_r**2)
+        weight = weight_x * weight_r
 
-        h_gate = weight * (dist - r_i**2) * (r_o**2 - dist)
+        # Normalized complementarity form
+        h_gate = weight * (r - r_i) * (r_o - r) / gate_scale**2
+        
         gate_h_list.append(h_gate)
 
     gate_h = cs.vertcat(*gate_h_list)
@@ -194,14 +203,14 @@ def create_ocp_solver(
     nh = n_gates + n_obs
 
     ocp.constraints.lh = -1e3 * np.ones(nh)
-    ocp.constraints.uh = np.zeros(nh)
+    ocp.constraints.uh = 0 * np.ones(nh)
 
     ocp.constraints.idxsh = np.arange(nh)
 
-    ocp.cost.Zl = 5 * np.ones(nh)
-    ocp.cost.Zu = np.array([1000]*n_gates + [5]*n_obs)
-    ocp.cost.zl = 1 * np.ones(nh)
-    ocp.cost.zu = np.array([1000]*n_gates + [100]*n_obs)
+    ocp.cost.Zl = 0 * np.ones(nh)
+    ocp.cost.Zu = np.array([2500]*n_gates + [500]*n_obs)
+    ocp.cost.zl = 0 * np.ones(nh)
+    ocp.cost.zu = np.array([1]*n_gates + [1]*n_obs)
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
