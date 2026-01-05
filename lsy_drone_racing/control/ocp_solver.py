@@ -132,17 +132,17 @@ def create_ocp_solver(
     cs.reshape(gate_c, -1, 1),
     cs.reshape(obs_c, -1, 1),)
 
-    ocp.parameter_values = np.zeros((4*n_gates + 2*n_obs,))
+    ocp.parameter_values = np.zeros((4*n_gates + 2*n_obs))
 
     # obstacles 
-    r_obs = 0.4
+    r_obs = 0.1
     obs_h_list = []
 
     for i in range(n_obs):
         dx = ocp.model.x[0] - obs_c[0, i]
         dy = ocp.model.x[1] - obs_c[1, i]
-        dist = cs.sqrt(dx**2 + dy**2 + 1e-6)
-        h_obs = (r_obs - dist) / r_obs
+        dist = dx**2 + dy**2 
+        h_obs = (r_obs**2 - dist) / r_obs
         obs_h_list.append(h_obs)
 
     obs_h = cs.vertcat(*obs_h_list)
@@ -207,9 +207,9 @@ def create_ocp_solver(
     ocp.constraints.idxsh = np.arange(nh)
 
     ocp.cost.Zl = 0 * np.ones(nh)
-    ocp.cost.Zu = np.array([2500]*n_gates + [500]*n_obs)
+    ocp.cost.Zu = np.array([1500]*n_gates + [1000]*n_obs)
     ocp.cost.zl = 0 * np.ones(nh)
-    ocp.cost.zu = np.array([1]*n_gates + [1]*n_obs)
+    ocp.cost.zu = np.array([5]*n_gates + [5]*n_obs)
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))

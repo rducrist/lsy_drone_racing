@@ -35,10 +35,10 @@ class PmmMPC(Controller):
         super().__init__(obs, info, config)
         self._env_id = config.env.id
 
-        self._N = 25
+        self._N = 35
         self._dt = 1 / config.env.freq
         # self._T_HORIZON = self._N * self._dt
-        self._T_HORIZON = 0.8
+        self._T_HORIZON = 0.6
 
         self._update_obs(obs)
         self._last_gate_pos = self._current_gate_pos
@@ -154,7 +154,7 @@ class PmmMPC(Controller):
     def episode_callback(self):
         """What has to be called at the end of episode."""
         # self.plotter.plot_solver_times()
-        # self.plotter.plot_costs()
+        self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
 
@@ -199,7 +199,8 @@ class PmmMPC(Controller):
 
             # obstacles
             for o in range(n_obs):
-                p[offset + 2 * o : offset + 2 * o + 2] = self._obstacles[o][2:]
+                p[offset + 2 * o] = self._obstacles[o][0]      # x
+                p[offset + 2 * o + 1] = self._obstacles[o][1]  # y
 
             self._acados_ocp_solver.set(stage, "p", p)
 
