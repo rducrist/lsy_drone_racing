@@ -35,24 +35,24 @@ class PmmMPC(Controller):
         super().__init__(obs, info, config)
         self._env_id = config.env.id
 
-        self._N = 15
-        self._dt = 1 / config.env.freq
-        # self._T_HORIZON = self._N * self._dt
-        self._T_HORIZON = 0.7
+        self._N = 40
+        self._T_HORIZON = 0.6
+        self._dt = 1/150
+ 
 
         self._update_obs(obs)
         self._last_gate_pos = self._gates[self._current_gate_idx].copy()
 
         self.corridor = np.array([0.05, 0.05, 0.05])
-        self.corridor_default = np.array([10.0, 10.0, 10.0])
+        self.corridor_default = np.array([0.5, 0.5, 0.5])
         self.gate_influence_radius = 1
-        self._sensor_range = 0.5
+        self._sensor_range = 0.65
 
         self._gate_locked = [False] * len(self._gates)   # oder len(self._gates_nom) / track.gates
         self._last_replanned_gate_idx = -1               # optional
         self._just_replanned = False   
 
-        self.drone_params = load_params("so_rpy", config.sim.drone_model)
+        self.drone_params = load_params("so_rpy_rotor", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
             self._T_HORIZON, self._N, self.drone_params
         )
@@ -96,8 +96,8 @@ class PmmMPC(Controller):
 
         # MPCC weights (used in parameter p[j, 6:9])
         self._qc = 300.0
-        self._ql = 150.0
-        self._mu = 1.5
+        self._ql = 250.0
+        self._mu = 3.0
 
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
@@ -112,18 +112,18 @@ class PmmMPC(Controller):
 
         i = self._current_gate_idx
 
-        if entered_sensor_range and (not self._gate_locked[i]):
-            # Lock gate pose ONCE
-            self._gate_locked[i] = True
+        # if entered_sensor_range and (not self._gate_locked[i]):
+        #     # Lock gate pose ONCE
+        #     self._gate_locked[i] = True
 
-            # (Optional) freeze the measured pose for the rest of the run
-            self._locked_gate_pos = self._current_gate_pos.copy()   # oder array pro gate
+        #     # (Optional) freeze the measured pose for the rest of the run
+        #     self._locked_gate_pos = self._current_gate_pos.copy()   # oder array pro gate
 
-            # Replan ONCE
-            self._replan_trajectory()
+        #     # Replan ONCE
+        #     self._replan_trajectory()
 
-            # Mark that we must reset theta/vtheta based on NEW path
-            self._just_replanned = True
+        #     # Mark that we must reset theta/vtheta based on NEW path
+        #     self._just_replanned = True
     
         # # Initial progress state based on closest point on PMM path
         # s_cur, _ = self._project_on_pmm_path(self._pos)
@@ -430,7 +430,7 @@ class PmmMPC(Controller):
             
         # validate start_gate_idx   
         n_gates = len(self._gates)
-        short_after = 0.2          # 0.1 m hinter dem Gate
+        short_after = 0.3         # 0.1 m hinter dem Gate
         for i in range(start_gate_idx, n_gates):
             gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
@@ -443,29 +443,29 @@ class PmmMPC(Controller):
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
 
-            #  # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
-            # if i == 2: 
-            #     # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
-            #     wp_after_short = gate_pos + short_after * gate_forward
-            #     waypoints.append(wp_after_short)
+             # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
+            if i == 2: 
+                # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
+                wp_after_short = gate_pos + short_after * gate_forward
+                waypoints.append(wp_after_short)
 
-            #     # # 2) zurück zum Gate 3 (wieder durch’s Gate)
-            #     # waypoints.append(gate_pos)
+                # # 2) zurück zum Gate 3 (wieder durch’s Gate)
+                waypoints.append(gate_pos)
 
-            #     # 3) wieder vor Gate 3 (Richtung Gate 4 ausrichten)
-            #     waypoints.append(gate_pos - short_after * wp_before)
-            #     # Instead of wp_after, go directly to BEFORE Gate 4
-            #     if i + 1 < n_gates:
-            #         next_gate_pos = self._gates[i+1]
-            #         next_gate_quat = self._gates_quat[i+1]
-            #         R_next = R.from_quat(next_gate_quat).as_matrix()
-            #         next_forward = R_next[:, 0]
+                # 3) wieder vor Gate 3 (Richtung Gate 4 ausrichten)
+                waypoints.append(wp_before)
+                # Instead of wp_after, go directly to BEFORE Gate 4
+                if i + 1 < n_gates:
+                    next_gate_pos = self._gates[i+1]
+                    next_gate_quat = self._gates_quat[i+1]
+                    R_next = R.from_quat(next_gate_quat).as_matrix()
+                    next_forward = R_next[:, 0]
 
-            #         next_wp_before = next_gate_pos - distance_before * next_forward
-            #         waypoints.append(next_wp_before)
-            #     continue  # skip the normal wp_after
+                    next_wp_before = next_gate_pos - distance_before * next_forward
+                    waypoints.append(next_wp_before)
+                continue  # skip the normal wp_after
 
-        # Otherwise: add normal AFTER waypoint
+        #Otherwise: add normal AFTER waypoint
             waypoints.append(wp_after)
 
         self._waypoints = np.vstack(waypoints)

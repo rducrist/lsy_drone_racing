@@ -5,7 +5,7 @@ from __future__ import annotations  # Python 3.10 type hints
 import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from lsy_drone_racing.control.mpcc_model import symbolic_dynamics_euler_mpcc
+from lsy_drone_racing.control.mpcc_model_motor import symbolic_dynamics_euler_mpcc
 import casadi as cs
 
 
@@ -16,6 +16,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
         gravity_vec=parameters["gravity_vec"],
         J=parameters["J"],
         J_inv=parameters["J_inv"],
+        thrust_time_coef=parameters["thrust_time_coef"],
         acc_coef=parameters["acc_coef"],
         cmd_f_coef=parameters["cmd_f_coef"],
         rpy_coef=parameters["rpy_coef"],
@@ -67,9 +68,9 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     el_sq = lag_err**2
 
     #Regularitaion weights 
-    R_vth = parameters.get("R_vtheta", 3.2) # weight for smooth progress accel
-    R_u   = parameters.get("R_inputs", 1.0) # weight for control inputs rpy
-    R_T   = parameters.get("R_thrust", 11.0) # weight for thrust 
+    R_vth = parameters.get("R_vtheta", 3.0) # weight for smooth progress accel
+    R_u   = parameters.get("R_inputs", 50.0) # weight for control inputs rpy
+    R_T   = parameters.get("R_thrust", 70.0) # weight for thrust 
 
     #MPCC Stage Cost
 
@@ -169,16 +170,16 @@ def create_ocp_solver(
     # ----------- Constraint formulation ---------------
 
     # Set State Constraints (rpy < 30°)
-    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.9, -0.9, -0.9])
-    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.9, 0.9, 0.9])
+    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.5, -0.5, -0.5])
+    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.5, 0.5, 0.5])
     ocp.constraints.idxbx = np.array([0, 1, 2, 3, 4, 5])
 
     # Set Input Constraints 
     # (rpy < 30°) and (thrust within physical limits) and (dvtheta_cmd limits)
-    dvtheta_min = -10.0
-    dvtheta_max =  10.0
-    ocp.constraints.lbu = np.array([-0.9, -0.9, -0.9, parameters["thrust_min"] * 4, dvtheta_min])
-    ocp.constraints.ubu = np.array([0.9, 0.9, 0.9, parameters["thrust_max"] * 4, dvtheta_max])
+    dvtheta_min = -20.0
+    dvtheta_max =  20.0
+    ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4, dvtheta_min])
+    ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4, dvtheta_max])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
 
@@ -188,20 +189,20 @@ def create_ocp_solver(
     ocp.constraints.uh = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     ocp.constraints.idxsh = np.array([0, 1, 2, 3, 4, 5, 6, 7])
     nsbx = ocp.constraints.idxsh.shape[0]
-    ocp.cost.Zl = 5 * np.ones((nsbx,))
-    ocp.cost.Zu = 5 * np.ones((nsbx,))
-    ocp.cost.zl = 1 * np.ones((nsbx,))
-    #ocp.cost.zu = 350 * np.ones((nsbx,))
-    ocp.cost.zu = np.array([350,350,350,350,  1000,1000,1000,1000], dtype=float)
+    ocp.cost.Zl = 0 * np.ones((nsbx,))
+    ocp.cost.Zu = 0 * np.ones((nsbx,))
+    ocp.cost.zl = 0 * np.ones((nsbx,))
+    ocp.cost.zu = 0 * np.ones((nsbx,))
+    #ocp.cost.zu = np.array([350,350,350,350,  1000,1000,1000,1000], dtype=float)
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
 
     # Solver Options
-    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
+    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
-    ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
+    ocp.solver_options.nlp_solver_type = "SQP_RTI"  # SQP, SQP_RTI
     ocp.solver_options.tol = 1e-4
 
     ocp.solver_options.qp_solver_cond_N = N
