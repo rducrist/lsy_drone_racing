@@ -16,6 +16,7 @@ import numpy as np
 from drone_models.core import load_params
 from drone_models.utils.rotation import ang_vel2rpy_rates
 from pmm_planner.utils import plan_pmm_trajectory
+from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.control import Controller
@@ -38,7 +39,7 @@ class PmmMPC(Controller):
         self._N = 40
         self._T_HORIZON = 1.0
         self._dt = self._T_HORIZON / self._N
- 
+
         self._update_obs(obs)
 
         self.drone_params = load_params("so_rpy_rotor", config.sim.drone_model)
@@ -47,7 +48,6 @@ class PmmMPC(Controller):
         )
         self._nx = self._ocp.model.x.rows()
         self._nu = self._ocp.model.u.rows()
-    
 
         # Hover thrust and last_u
         hover_thrust = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
@@ -74,6 +74,41 @@ class PmmMPC(Controller):
 
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
+        # Precompute arc length along PMM path for MPCC
+        diffs = np.diff(self._p_pmm, axis=0)
+        seg_lens = np.linalg.norm(diffs, axis=1)
+
+        s_pmm = np.concatenate(([0.0], np.cumsum(seg_lens)))
+        self._theta_max = float(s_pmm[-1])
+        self._delta_theta = 0.05
+
+        theta_grid = np.arange(
+            0.0, self._theta_max, self._delta_theta
+        )  # uniform arc-length grid
+        p_of_theta = interp1d(s_pmm, self._p_pmm, axis=0, kind="linear", fill_value="extrapolate")
+
+        pd_list = p_of_theta(theta_grid)
+        tp_list = np.zeros_like(pd_list)
+
+        # Like in MPCC paper
+        tp_list[1:-1] = (pd_list[2:] - pd_list[:-2]) / (2.0 * self._delta_theta)
+        tp_list[0] = (pd_list[1] - pd_list[0]) / self._delta_theta
+        tp_list[-1] = (pd_list[-1] - pd_list[-2]) / self._delta_theta
+
+        # Normalize
+        tp_norm = np.linalg.norm(tp_list, axis=1, keepdims=True)
+        tp_list = tp_list / (tp_norm + 1e-8)
+
+        self._theta_grid = theta_grid
+        self._pd_list = pd_list
+        self._tp_list = tp_list
+
+        # flattened versions for solver parameters
+        self._pd_list_flat = pd_list.reshape(-1)
+        self._tp_list_flat = tp_list.reshape(-1)
+
+        self.p = np.concatenate([self._pd_list_flat, self._tp_list_flat])
+
         # For visualising using drawline()
         self.logger = MPCLogger()
         self.plotter = MPCPlotter(self.logger)
@@ -93,40 +128,27 @@ class PmmMPC(Controller):
         """Computes the control."""
         self._update_obs(obs)
 
-        s_cur, _ = self._project_on_pmm_path(self._pos)
-        _, t_ref = self._pos_and_tangent_from_s(s_cur)
-        v_par = float(np.dot(self._vel, t_ref))
-
-        if self._tick == 0 or self._just_replanned:
-            # hard re-init after replan
-            theta0 = float(s_cur)
-
-            # estimated vtheta from velocity projection (optional)
-            vtheta_est = float(np.clip(v_par, 0.1, 1.0))  # keep your bounds
-
-            # HARD CAP based on NEW path length:
-            vtheta_cap = 0.4 * float(self._s_total) / max(self._N * self._dt, 1e-6)
-
-            vtheta0 = float(min(vtheta_est, vtheta_cap))
-
-            self._just_replanned = False
+        if self._tick == 0:
+            s_cur, _ = self._project_on_pmm_path(self._pos)
+            theta0 = float(max(s_cur, self._last_theta))
+            vtheta0 = float(max(self._last_vtheta, 0.1))
         else:
             theta0 = float(self._last_theta)
             vtheta0 = float(self._last_vtheta)
 
-
         # Set initial state x0 for OCP
-        x0 = np.concatenate((self._pos, self._rpy, self._vel, self._drpy, np.array([theta0, vtheta0])))
+        x0 = np.concatenate(
+            (self._pos, self._rpy, self._vel, self._drpy, np.array([theta0, vtheta0]))
+        )
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
-        # Build MPCC parameter horizon & warm-start states
-        p_horizon = self._build_mpcc_parameters(theta0, vtheta0)
-        x_guess = self._build_x_guess(theta0, vtheta0)
-
-        # Apply parameters and warm-starts
-        self._apply_constraints(p_horizon, x_guess)
-
+        # Warmstart inputs
+        for j in range(self._N):
+            self._acados_ocp_solver.set(j, "u", self.last_u)
+            self._acados_ocp_solver.set(j, "p", self.p)
+        
+        self._acados_ocp_solver.set(self._N + 1, "p", self.p)
 
         # Solve MPCC
         t_start = time.perf_counter_ns()
@@ -141,9 +163,7 @@ class PmmMPC(Controller):
         predictions = self._extract_predictions()
 
         inner_gate_ring, outer_gate_ring = self._compute_gate_rings(
-            self._gates,
-            R.from_quat(self._gates_quat).as_matrix(),
-            0.1, 0.6, 30
+            self._gates, R.from_quat(self._gates_quat).as_matrix(), 0.1, 0.6, 30
         )
         self.logger.log_step(
             solver_time=(t_end - t_start) * 1e-6,
@@ -152,7 +172,7 @@ class PmmMPC(Controller):
             state=self._pos,
             control=u0,
             gate_inner_ring=inner_gate_ring,
-            gate_outer_ring=outer_gate_ring
+            gate_outer_ring=outer_gate_ring,
         )
         self.last_u = u0.copy()
         # print(f"theta0={theta0:.3f}, vtheta0={vtheta0:.3f}, u0={u0}")
@@ -189,7 +209,6 @@ class PmmMPC(Controller):
         preds = np.asarray(preds)
         return preds
 
-
     def _solve_mpc(self) -> tuple[NDArray[np.floating], np.floating]:
         self._acados_ocp_solver.solve()
 
@@ -199,79 +218,9 @@ class PmmMPC(Controller):
         return u0, cost
 
     # MPCC-specific functions
-    def _build_mpcc_parameters(self, theta0: float, vtheta0: float) -> NDArray[np.floating]:
-        """
-        Build per-stage MPCC parameter vectors
-
-            p_j = [p_ref(3), t_ref(3), qc, ql, mu, obs_1(2), obs_2(2), obs_3(2), obs_4(2), gate_1(4), gate_2(4), gate_3(4), gate_4(4)]
-                 ∈ ℝ^33
-
-        using theta0, vtheta0 and the PMM path and the current obstacle positions.
-        """            
-        p_horizon = np.zeros((self._N, 33))
-
-        for j in range(self._N):
-            p_ref, t_ref =   self._pos_and_tangent_from_s(theta0)
-
-            p_horizon[j, 0:3] = p_ref          # p_ref
-            p_horizon[j, 3:6] = t_ref          # t_ref
-            p_horizon[j, 6]   = self._qc       # qc
-            p_horizon[j, 7]   = self._ql       # ql
-            p_horizon[j, 8]   = self._mu       # mu
-
-        # --- Obstacle-Teil: 8 Einträge, für alle Stages gleich ---
-
-        # self._obstacles: shape (4, 3) → wir nehmen nur (x, y)
-        obs_xy = np.zeros(8)
-        num_obs = min(4, len(self._obstacles))
-        for k in range(num_obs):
-            obs_xy[2 * k : 2 * k + 2] = self._obstacles[k][:2]
-        
-        p_horizon[:, 9:17] = obs_xy[None, :]
-
-            
-        # gates: (gx,gy,gz,yaw) für 4 gates
-        gate_pack = np.zeros(4*4)
-        for i in range(4):
-            gpos = self._gates[i]
-            # yaw aus quat (xyz-euler, index 2)
-            yaw = float(R.from_quat(self._gates_quat[i]).as_euler("xyz")[2])
-            gate_pack[4*i:4*i+4] = [gpos[0], gpos[1], gpos[2], yaw]
-
-        p_horizon[:, 17:33] = gate_pack[None, :]
-
-        return p_horizon
-    
-    def _build_x_guess(self, theta0: float, vtheta0: float) -> NDArray[np.floating]:
-        """
-        Build a simple warm-start for the state trajectory:
-            pos, vel from PMM path,
-            rpy, drpy zero,
-            theta, vtheta linearly increasing.
-        """
-        x_guess = np.zeros((self._N, self._nx))
-
-        for j in range(self._N):
-            p_ref, _ = self._pos_and_tangent_from_s(theta0)
-
-            x_guess[j, 0:3] = p_ref                      # pos
-            # rpy (3:6) left at zero
-            # vel (6:9) - approximate via finite differences along PMM path:
-            if j < self._N - 1:
-                s_next = theta0 + (j + 1) * vtheta0 * self._dt
-                p_next, _ = self._pos_and_tangent_from_s(s_next)
-                v_approx = (p_next - p_ref) / self._dt
-                x_guess[j, 6:9] = v_approx
-            # drpy (9:12) left at zero
-            x_guess[j, 12] = theta0                         # theta
-            x_guess[j, 13] = vtheta0                     # vtheta
-
-        return x_guess
 
     def _apply_constraints(
-        self,
-        p_horizon: NDArray[np.floating],
-        x_guess: NDArray[np.floating],
+        self, p_horizon: NDArray[np.floating], x_guess: NDArray[np.floating]
     ) -> None:
         """
         Apply MPCC parameters and warm-start x/u into the acados solver.
@@ -320,55 +269,24 @@ class PmmMPC(Controller):
         }
         planner_config_file = "./pmm_uav_planner/config/planner/crazyflie.yaml"
         traj = plan_pmm_trajectory(waypoints_config, planner_config_file)
-        
+
         t_s, p_s, v_s, a_s = traj.get_sampled_trajectory(sampling_period)
         t_s, p_s, v_s, a_s = np.array(t_s), np.array(p_s), np.array(v_s), np.array(a_s)
-        
+
         self._t_pmm = t_s
         self._p_pmm = p_s
         self._v_pmm = v_s
         self._a_pmm = a_s
 
-        # Precompute arc length along PMM path for MPCC
-        diffs = np.diff(self._p_pmm, axis=0)
-        seg_lens = np.linalg.norm(diffs, axis=1)
-        self._s_pmm = np.concatenate(([0.0], np.cumsum(seg_lens)))
-        self._s_total = float(self._s_pmm[-1])
-        
         self.traj_pos_viz = self._p_pmm[::5]
         self.traj_vel_viz = self._v_pmm[::5]
 
     def _project_on_pmm_path(self, pos: NDArray[np.floating]) -> tuple[float, int]:
-        """ Project current position onto PMM path (in a nearest-neighbor sense) and return (s_cur, index). """
+        """Project current position onto PMM path (in a nearest-neighbor sense) and return (s_cur, index)."""
         dists = np.linalg.norm(self._p_pmm - pos[None, :], axis=1)
         idx = int(np.argmin(dists))
         s_cur = self._s_pmm[idx]
         return s_cur, idx
-
-    def _pos_and_tangent_from_s(self, s: float) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """ Get interpolated position and tangent on PMM path for a given arc length s. Linear interpolation between two neighboring PMM samples. """
-        # clamp s into valid range
-        s_clamped = np.clip(s, 0.0, max(self._s_total - 1e-6, 0.0))
-
-        # find segment index
-        idx = int(np.searchsorted(self._s_pmm, s_clamped, side="right") - 1)
-        idx = np.clip(idx, 0, len(self._s_pmm) - 2)
-        s0 = self._s_pmm[idx]
-        s1 = self._s_pmm[idx + 1]
-        p0 = self._p_pmm[idx]
-        p1 = self._p_pmm[idx + 1]
-        if s1 - s0 > 1e-9:
-            tau = (s_clamped - s0) / (s1 - s0)
-        else:
-            tau = 0.0
-        p_ref = (1.0 - tau) * p0 + tau * p1
-        t_vec = p1 - p0
-        norm_t = np.linalg.norm(t_vec)
-        if norm_t < 1e-9:
-            t_ref = np.array([1.0, 0.0, 0.0])
-        else:
-            t_ref = t_vec / norm_t
-        return p_ref, t_ref
 
     def _generate_gate_waypoints(
         self,
@@ -379,10 +297,10 @@ class PmmMPC(Controller):
     ) -> None:
         """This function generates a set of waypoints for each gate starting from current gate index."""
         waypoints = [start_pos.copy()]  # start at drone
-            
-        # validate start_gate_idx   
+
+        # validate start_gate_idx
         n_gates = len(self._gates)
-        short_after = 0.3         # 0.1 m hinter dem Gate
+        short_after = 0.3  # 0.1 m hinter dem Gate
         for i in range(start_gate_idx, n_gates):
             gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
@@ -395,8 +313,8 @@ class PmmMPC(Controller):
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
 
-             # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
-            if i == 2: 
+            # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
+            if i == 2:
                 # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
                 wp_after_short = gate_pos + short_after * gate_forward
                 waypoints.append(wp_after_short)
@@ -408,8 +326,8 @@ class PmmMPC(Controller):
                 waypoints.append(wp_before)
                 # Instead of wp_after, go directly to BEFORE Gate 4
                 if i + 1 < n_gates:
-                    next_gate_pos = self._gates[i+1]
-                    next_gate_quat = self._gates_quat[i+1]
+                    next_gate_pos = self._gates[i + 1]
+                    next_gate_quat = self._gates_quat[i + 1]
                     R_next = R.from_quat(next_gate_quat).as_matrix()
                     next_forward = R_next[:, 0]
 
@@ -417,7 +335,7 @@ class PmmMPC(Controller):
                     waypoints.append(next_wp_before)
                 continue  # skip the normal wp_after
 
-        #Otherwise: add normal AFTER waypoint
+            # Otherwise: add normal AFTER waypoint
             waypoints.append(wp_after)
 
         self._waypoints = np.vstack(waypoints)
@@ -425,7 +343,7 @@ class PmmMPC(Controller):
     def _replan_trajectory(self) -> None:
         """Re-generate PMM trajectory when gates move."""
         self._generate_gate_waypoints(
-            self._pos,self._current_gate_idx, self._distance_before, self._distance_after
+            self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
         self._start_vel = self._vel
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
@@ -441,7 +359,9 @@ class PmmMPC(Controller):
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
 
-    def _compute_gate_rings(self, gate_c, R, r_i, r_o, n_pts=60) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    def _compute_gate_rings(
+        self, gate_c, R, r_i, r_o, n_pts=60
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """Compute inner and outer annulus rings of a gate in world frame.
 
         Args:
