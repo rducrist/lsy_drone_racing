@@ -5,13 +5,13 @@ from __future__ import annotations  # Python 3.10 type hints
 import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from lsy_drone_racing.control.mpcc_model_motor import symbolic_dynamics_euler_mpcc
+from lsy_drone_racing.control.mpcc_model import symbolic_dynamics_euler_mpcc_so_rpy_rotor
 import casadi as cs
 
 
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
-    X_dot, X, U, _ = symbolic_dynamics_euler_mpcc(
+    X_dot, X, U, _ = symbolic_dynamics_euler_mpcc_so_rpy_rotor(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
         J=parameters["J"],
@@ -190,7 +190,7 @@ def create_ocp_solver(
     ocp.constraints.idxsh = np.array([0, 1, 2, 3, 4, 5, 6, 7])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 0 * np.ones((nsbx,))
-    ocp.cost.Zu = 0 * np.ones((nsbx,))
+    ocp.cost.Zu = np.array([500]*4 + [500]*4)
     ocp.cost.zl = 0 * np.ones((nsbx,))
     ocp.cost.zu = 0 * np.ones((nsbx,))
     #ocp.cost.zu = np.array([350,350,350,350,  1000,1000,1000,1000], dtype=float)
@@ -199,7 +199,7 @@ def create_ocp_solver(
     ocp.constraints.x0 = np.zeros((nx))
 
     # Solver Options
-    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
+    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
     ocp.solver_options.nlp_solver_type = "SQP_RTI"  # SQP, SQP_RTI

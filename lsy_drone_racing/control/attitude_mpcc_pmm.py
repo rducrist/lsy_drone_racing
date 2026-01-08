@@ -36,21 +36,10 @@ class PmmMPC(Controller):
         self._env_id = config.env.id
 
         self._N = 40
-        self._T_HORIZON = 0.6
-        self._dt = 1/150
+        self._T_HORIZON = 1.0
+        self._dt = self._T_HORIZON / self._N
  
-
         self._update_obs(obs)
-        self._last_gate_pos = self._gates[self._current_gate_idx].copy()
-
-        self.corridor = np.array([0.05, 0.05, 0.05])
-        self.corridor_default = np.array([0.5, 0.5, 0.5])
-        self.gate_influence_radius = 1
-        self._sensor_range = 0.65
-
-        self._gate_locked = [False] * len(self._gates)   # oder len(self._gates_nom) / track.gates
-        self._last_replanned_gate_idx = -1               # optional
-        self._just_replanned = False   
 
         self.drone_params = load_params("so_rpy_rotor", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
@@ -65,10 +54,14 @@ class PmmMPC(Controller):
         # U = [cmd_roll, cmd_pitch, cmd_yaw, cmd_thrust, dvtheta_cmd]
         self.last_u = np.array([0.0, 0.0, 0.0, hover_thrust, 0.0])
 
-
         # MPCC longitudinal progress states (theta, vtheta)
         self._last_theta = 0.0
-        self._last_vtheta = 0.0
+        self._last_d_theta = 0.0
+
+        # MPCC weights (used in parameter p[j, 6:9])
+        self._qc = 300.0
+        self._ql = 250.0
+        self._mu = 3.0
 
         # PMM planner
         self._distance_before = 0.3
@@ -94,51 +87,12 @@ class PmmMPC(Controller):
         self._finished = False
         self._config = config
 
-        # MPCC weights (used in parameter p[j, 6:9])
-        self._qc = 300.0
-        self._ql = 250.0
-        self._mu = 3.0
-
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Computes the control."""
         self._update_obs(obs)
 
-
-        dist_to_gate = np.linalg.norm(self._current_gate_pos - self._pos)
-        gate_moved = np.linalg.norm(self._last_gate_pos - self._current_gate_pos) > 0.001
-        entered_sensor_range = dist_to_gate < self._sensor_range
-
-        i = self._current_gate_idx
-
-        # if entered_sensor_range and (not self._gate_locked[i]):
-        #     # Lock gate pose ONCE
-        #     self._gate_locked[i] = True
-
-        #     # (Optional) freeze the measured pose for the rest of the run
-        #     self._locked_gate_pos = self._current_gate_pos.copy()   # oder array pro gate
-
-        #     # Replan ONCE
-        #     self._replan_trajectory()
-
-        #     # Mark that we must reset theta/vtheta based on NEW path
-        #     self._just_replanned = True
-    
-        # # Initial progress state based on closest point on PMM path
-        # s_cur, _ = self._project_on_pmm_path(self._pos)
-        # p_ref, t_ref = self._pos_and_tangent_from_s(s_cur)
-        # v_par = float(np.dot(self._vel, t_ref))  # Projektion
-
-        # if self._tick == 0:
-        #     theta0 = s_cur
-        #     #vtheta0 = max(0.1, np.linalg.norm(self._vel))
-        #     vtheta0 = max(0.1, 0.5)
-        # else:
-        #     theta0 = self._last_theta
-        #     vtheta0 = self._last_vtheta
-        
-        # project on CURRENT (possibly replanned) PMM
         s_cur, _ = self._project_on_pmm_path(self._pos)
         _, t_ref = self._pos_and_tangent_from_s(s_cur)
         v_par = float(np.dot(self._vel, t_ref))
@@ -257,8 +211,7 @@ class PmmMPC(Controller):
         p_horizon = np.zeros((self._N, 33))
 
         for j in range(self._N):
-            s_j = theta0 + j * vtheta0 * self._dt
-            p_ref, t_ref = self._pos_and_tangent_from_s(s_j)
+            p_ref, t_ref =   self._pos_and_tangent_from_s(theta0)
 
             p_horizon[j, 0:3] = p_ref          # p_ref
             p_horizon[j, 3:6] = t_ref          # t_ref
@@ -299,8 +252,7 @@ class PmmMPC(Controller):
         x_guess = np.zeros((self._N, self._nx))
 
         for j in range(self._N):
-            s_j = theta0 + j * vtheta0 * self._dt
-            p_ref, _ = self._pos_and_tangent_from_s(s_j)
+            p_ref, _ = self._pos_and_tangent_from_s(theta0)
 
             x_guess[j, 0:3] = p_ref                      # pos
             # rpy (3:6) left at zero
@@ -311,7 +263,7 @@ class PmmMPC(Controller):
                 v_approx = (p_next - p_ref) / self._dt
                 x_guess[j, 6:9] = v_approx
             # drpy (9:12) left at zero
-            x_guess[j, 12] = s_j                         # theta
+            x_guess[j, 12] = theta0                         # theta
             x_guess[j, 13] = vtheta0                     # vtheta
 
         return x_guess
