@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import casadi as cs
+from casadi import MX, cos, sin, vertcat
 import drone_models.symbols as symbols
 from drone_models.utils import rotation
 
 if TYPE_CHECKING:
     from array_api_typing import Array
+
 
 def symbolic_dynamics_euler_mpcc_so_rpy_rotor(
     model_rotor_vel: bool = False,
@@ -31,43 +33,83 @@ def symbolic_dynamics_euler_mpcc_so_rpy_rotor(
 
     This function returns the actual model, as defined in the paper, for direct use.
     """
+    """Build the quadrotor dynamics model."""
+    
+    # Rate model parameters (from system identification)
+    params_pitch_rate = [-6.003842038081178, 6.213752925707588]
+    params_roll_rate = [-3.960889336015948, 4.078293254657104]
+    params_yaw_rate = [-0.005347588299390372, 0.0]
+    
+    # State variables
+    px = MX.sym("px")
+    py = MX.sym("py")
+    pz = MX.sym("pz")
+    vx = MX.sym("vx")
+    vy = MX.sym("vy")
+    vz = MX.sym("vz")
+    roll = MX.sym("roll")
+    pitch = MX.sym("pitch")
+    yaw = MX.sym("yaw")
+    f_collective = MX.sym("f_collective")
+    f_cmd = MX.sym("f_cmd")
+    r_cmd = MX.sym("r_cmd")
+    p_cmd = MX.sym("p_cmd")
+    y_cmd = MX.sym("y_cmd")
+    theta = MX.sym("theta")  # Progress along path
+    
+    # Input variables
+    df_cmd = MX.sym("df_cmd")
+    dr_cmd = MX.sym("dr_cmd")
+    dp_cmd = MX.sym("dp_cmd")
+    dy_cmd = MX.sym("dy_cmd")
+    v_theta_cmd = MX.sym("v_theta_cmd")  # Progress speed
+    
+    # State and input vectors
+    states = vertcat(
+        px, py, pz,
+        vx, vy, vz,
+        roll, pitch, yaw,
+        f_collective, f_cmd,
+        r_cmd, p_cmd, y_cmd,
+        theta
+    )
+    inputs = vertcat(
+        df_cmd, dr_cmd, dp_cmd, dy_cmd,
+        v_theta_cmd
+    )
+    
+    # Dynamics equations
+    thrust = f_collective
+    inv_mass = 1.0 / mass
+    
+    # Acceleration from thrust
+    ax = inv_mass * thrust * (
+        cos(roll) * sin(pitch) * cos(yaw)
+        + sin(roll) * sin(yaw)
+    )
+    ay = inv_mass * thrust * (
+        cos(roll) * sin(pitch) * sin(yaw)
+        - sin(roll) * cos(yaw)
+    )
+    az = inv_mass * thrust * cos(roll) * cos(pitch) - gravity_vec[2]
+    
+    # Continuous dynamics
+    f_dyn = vertcat(
+        vx,
+        vy,
+        vz,
+        ax,
+        ay,
+        az,
+        params_roll_rate[0] * roll + params_roll_rate[1] * r_cmd,
+        params_pitch_rate[0] * pitch + params_pitch_rate[1] * p_cmd,
+        params_yaw_rate[0] * yaw + params_yaw_rate[1] * y_cmd,
+        10.0 * (f_cmd - f_collective),
+        df_cmd,
+        dr_cmd,
+        dp_cmd,
+        dy_cmd,
+        v_theta_cmd
+    )
 
-    # MPCC progress variables 
-    theta = cs.MX.sym("theta")
-    d_theta = cs.MX.sym("d_theta")
-    cmd_dd_theta = cs.MX.sym("cmd_dd_theta")
-
-    # States and Inputs
-    X = cs.vertcat(symbols.pos, symbols.rpy, symbols.vel, symbols.drpy, theta, d_theta)
-    if model_rotor_vel:
-        X = cs.vertcat(X, symbols.rotor_vel)
-    U = cs.vertcat(symbols.cmd_rpyt, cmd_dd_theta)
-    cmd_rpy = U[:3]
-    cmd_thrust = U[3]
-    cmd_dd_theta = U[4]
-    rot = rotation.cs_rpy2matrix(symbols.rpy)
-
-    # Defining the dynamics function
-    # Note that we are abusing the rotor_vel state as the thrust
-    if model_rotor_vel:
-        rotor_vel_dot = 1 / thrust_time_coef * (cmd_thrust - symbols.rotor_vel)
-        forces_motor = symbols.rotor_vel[0]  # We are only using the first element
-    else:
-        forces_motor = cmd_thrust
-
-    # Creating force vector
-    forces_motor_vec = cs.vertcat(0, 0, acc_coef + cmd_f_coef * forces_motor)
-
-    # Linear equation of motion
-    pos_dot = symbols.vel
-    vel_dot = rot @ forces_motor_vec / mass + gravity_vec
-
-    ddrpy = rpy_coef * symbols.rpy + rpy_rates_coef * symbols.drpy + cmd_rpy_coef * cmd_rpy
-
-    if model_rotor_vel:
-        X_dot = cs.vertcat(pos_dot, symbols.drpy, vel_dot, ddrpy, rotor_vel_dot, d_theta, cmd_dd_theta)
-    else:
-        X_dot = cs.vertcat(pos_dot, symbols.drpy, vel_dot, ddrpy, d_theta, cmd_dd_theta)
-    Y = cs.vertcat(symbols.pos, symbols.rpy)
-
-    return X_dot, X, U, Y
+    return f_dyn, states, inputs

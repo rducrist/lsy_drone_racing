@@ -23,6 +23,7 @@ from lsy_drone_racing.control import Controller
 from lsy_drone_racing.control.mpc_logger import MPCLogger
 from lsy_drone_racing.control.mpc_plotter import MPCPlotter
 from lsy_drone_racing.control.ocp_solver import create_ocp_solver
+from lsy_drone_racing.control.mpcc_solver_config import MPCCSolverConfig
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -35,9 +36,10 @@ class PmmMPC(Controller):
         """Initializes MPC and pmm planner parameters."""
         super().__init__(obs, info, config)
         self._env_id = config.env.id
+        mpcc_config = MPCCSolverConfig()
 
         self._N = 40
-        self._T_HORIZON = 1.0
+        self._T_HORIZON = 0.7
         self._dt = self._T_HORIZON / self._N
 
         self._update_obs(obs)
@@ -52,16 +54,12 @@ class PmmMPC(Controller):
         # Hover thrust and last_u
         hover_thrust = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
         # U = [cmd_roll, cmd_pitch, cmd_yaw, cmd_thrust, dvtheta_cmd]
-        self.last_u = np.array([0.0, 0.0, 0.0, hover_thrust, 0.0])
 
         # MPCC longitudinal progress states (theta, vtheta)
         self._last_theta = 0.0
-        self._last_d_theta = 0.0
-
-        # MPCC weights (used in parameter p[j, 6:9])
-        self._qc = 300.0
-        self._ql = 250.0
-        self._mu = 3.0
+        self._last_f_collective = hover_thrust
+        self._last_f_cmd = hover_thrust
+        self._last_cmd_rpy = np.zeros(3)
 
         # PMM planner
         self._distance_before = 0.3
@@ -79,12 +77,9 @@ class PmmMPC(Controller):
         seg_lens = np.linalg.norm(diffs, axis=1)
 
         s_pmm = np.concatenate(([0.0], np.cumsum(seg_lens)))
-        self._theta_max = float(s_pmm[-1])
-        self._delta_theta = 0.05
+        self._delta_theta = mpcc_config.delta_theta
 
-        theta_grid = np.arange(
-            0.0, self._theta_max, self._delta_theta
-        )  # uniform arc-length grid
+        theta_grid = mpcc_config.theta_grid
         p_of_theta = interp1d(s_pmm, self._p_pmm, axis=0, kind="linear", fill_value="extrapolate")
 
         pd_list = p_of_theta(theta_grid)
@@ -128,27 +123,18 @@ class PmmMPC(Controller):
         """Computes the control."""
         self._update_obs(obs)
 
-        if self._tick == 0:
-            s_cur, _ = self._project_on_pmm_path(self._pos)
-            theta0 = float(max(s_cur, self._last_theta))
-            vtheta0 = float(max(self._last_vtheta, 0.1))
-        else:
-            theta0 = float(self._last_theta)
-            vtheta0 = float(self._last_vtheta)
-
         # Set initial state x0 for OCP
         x0 = np.concatenate(
-            (self._pos, self._rpy, self._vel, self._drpy, np.array([theta0, vtheta0]))
+            (self._pos, self._vel,self._rpy, np.array([self._last_f_collective,  self._last_f_cmd]),  self._last_cmd_rpy, np.array([self._last_theta]))
         )
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
         # Warmstart inputs
-        for j in range(self._N):
-            self._acados_ocp_solver.set(j, "u", self.last_u)
+        for j in range(self._N+1):
             self._acados_ocp_solver.set(j, "p", self.p)
         
-        self._acados_ocp_solver.set(self._N + 1, "p", self.p)
+        # self._acados_ocp_solver.set(self._N + 1, "p", self.p)
 
         # Solve MPCC
         t_start = time.perf_counter_ns()
@@ -156,9 +142,13 @@ class PmmMPC(Controller):
         t_end = time.perf_counter_ns()
 
         # Extract next state's theta, vtheta for next iteration
-        x1 = self._acados_ocp_solver.get(1, "x")
-        self._last_theta = float(x1[-2])
-        self._last_vtheta = float(x1[-1])
+        x_next = self._acados_ocp_solver.get(1, "x")
+        self._last_theta = float(x_next[-1])
+        self._last_f_collective = float(x_next[9])
+        self._last_f_cmd = float(x_next[10])
+        self._last_cmd_rpy = x_next[11:14]
+
+        cost = self._acados_ocp_solver.get_cost()
 
         predictions = self._extract_predictions()
 
@@ -174,9 +164,14 @@ class PmmMPC(Controller):
             gate_inner_ring=inner_gate_ring,
             gate_outer_ring=outer_gate_ring,
         )
-        self.last_u = u0.copy()
-        # print(f"theta0={theta0:.3f}, vtheta0={vtheta0:.3f}, u0={u0}")
-        return u0[:4]
+        cmd = np.array([
+            self._last_cmd_rpy[0],
+            self._last_cmd_rpy[1],
+            self._last_cmd_rpy[2],
+            self._last_f_cmd
+        ], dtype=np.float32)
+
+        return cmd
 
     def step_callback(
         self,
@@ -216,27 +211,6 @@ class PmmMPC(Controller):
         cost = self._acados_ocp_solver.get_cost()
 
         return u0, cost
-
-    # MPCC-specific functions
-
-    def _apply_constraints(
-        self, p_horizon: NDArray[np.floating], x_guess: NDArray[np.floating]
-    ) -> None:
-        """
-        Apply MPCC parameters and warm-start x/u into the acados solver.
-        """
-        for j in range(self._N):
-            stage = j + 1
-
-            # set MPCC parameters for stage j
-            self._acados_ocp_solver.set(stage, "p", p_horizon[j])
-
-            # warm-start state
-            self._acados_ocp_solver.set(stage, "x", x_guess[j])
-
-            # IMPORTANT: do not set u at terminal stage
-            if stage < self._N:
-                self._acados_ocp_solver.set(stage, "u", self.last_u)
 
     def _update_obs(self, obs: dict[str, NDArray[np.floating]]) -> None:
         """Update internal state from observations."""
