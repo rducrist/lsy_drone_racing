@@ -12,9 +12,18 @@ class MPCCSolverConfig:
     delta_theta: float = 0.05
 
     # MPCC progress params
-    qc : int = 300.0
-    ql : int = 250.0
-    mu : int = 3.0
+    # Tracking cost 
+    q_lag: float = 500.0              # Lag error weight at gates
+    q_contour: float = 50.0          # Contour error weight at gates
+    q_attitude: float = 1.0 
+
+    # Control smoothness
+    r_thrust: float = 0.2                  # Thrust rate penalty
+    r_roll: float = 0.3                    # Roll rate penalty
+    r_pitch: float = 0.3                   # Pitch rate penalty
+    r_yaw: float = 0.50   
+    
+    mu_speed: float = 1.0 
 
     @property
     def dt(self) -> float:
@@ -28,7 +37,3 @@ class MPCCSolverConfig:
     def theta_grid(self) -> np.ndarray:
         return np.arange(0.0, self.model_traj_length, self.delta_theta)
     
-    @property
-    def get_progress_params(self) -> np.ndarray:
-        """Sdfs."""
-        return np.array([self.qc, self.ql, self.mu])

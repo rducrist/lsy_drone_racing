@@ -91,7 +91,7 @@ def symbolic_dynamics_euler_mpcc_so_rpy_rotor(
         cos(roll) * sin(pitch) * sin(yaw)
         - sin(roll) * cos(yaw)
     )
-    az = inv_mass * thrust * cos(roll) * cos(pitch) - gravity_vec[2]
+    az = inv_mass * thrust * cos(roll) * cos(pitch) + gravity_vec[2]
     
     # Continuous dynamics
     f_dyn = vertcat(

@@ -102,7 +102,7 @@ class PmmMPC(Controller):
         self._pd_list_flat = pd_list.reshape(-1)
         self._tp_list_flat = tp_list.reshape(-1)
 
-        self.p = np.concatenate([self._pd_list_flat, self._tp_list_flat])
+        self.p = np.concatenate([self._pd_list_flat, self._tp_list_flat, self._obstacles[:, :2].flatten()])
 
         # For visualising using drawline()
         self.logger = MPCLogger()
@@ -148,7 +148,9 @@ class PmmMPC(Controller):
         self._last_f_cmd = float(x_next[10])
         self._last_cmd_rpy = x_next[11:14]
 
+
         cost = self._acados_ocp_solver.get_cost()
+
 
         predictions = self._extract_predictions()
 
@@ -189,7 +191,7 @@ class PmmMPC(Controller):
     def episode_callback(self):
         """What has to be called at the end of episode."""
         # self.plotter.plot_solver_times()
-        # self.plotter.plot_costs()
+        self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
         self._last_theta = 0.0
