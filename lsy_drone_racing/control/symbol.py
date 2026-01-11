@@ -33,8 +33,6 @@ dist_t = cs.vertcat(dtx, dty, dtz)  # Disturbance torques
 
 # Fortschrittszustände für MPCC
 theta   = cs.MX.sym("theta")
-vtheta  = cs.MX.sym("vtheta")
-progress = cs.vertcat(theta, vtheta)
 
 # Inputs
 cmd_w1, cmd_w2, cmd_w3, cmd_w4 = (
@@ -50,8 +48,8 @@ cmd_thrust = cs.MX.sym("cmd_thrust")
 cmd_rpyt = cs.vertcat(cmd_roll, cmd_pitch, cmd_yaw, cmd_thrust)
 
 # Zusätzlicher MPCC-Input: Beschleunigung des Pfadfortschritts
-dvtheta_cmd   = cs.MX.sym("dvtheta_cmd")
-cmd_rpyt_vth  = cs.vertcat(cmd_rpyt, dvtheta_cmd)       # 5D Input für MPCC
+vtheta  = cs.MX.sym("vtheta")
+cmd_rpyt_vth  = cs.vertcat(cmd_rpyt, vtheta)       # 5D Input für MPCC
 
 # Special states for the so_rpy models
 roll, pitch, yaw = cs.MX.sym("roll"), cs.MX.sym("pitch"), cs.MX.sym("yaw")
