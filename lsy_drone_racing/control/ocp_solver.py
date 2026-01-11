@@ -41,13 +41,13 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     theta_grid = mpcc_config.theta_grid
 
     p = cs.MX.sym(
-        "p", 2 *3 * M + 2*4
+        "p", 2 * 3 * M + 2 * 4 
     )  # für MPCC 9 + 8 (4 Hindernisse mit je 2D Position) + 16 (4 Gates mit je 4 Werten)
     model.p = p
 
-    pd_list = p[:3*M]
-    tp_list = p[3*M : 2 *3 * M]
-    offset = 2 * M *3
+    pd_list = p[: 3 * M]
+    tp_list = p[3 * M : 2 * 3 * M]
+    offset = 2 * M * 3
     # ---- Obstacle-Teil ----------------------------
     obs_1 = p[offset : offset + 2]
     obs_2 = p[offset + 2 : offset + 4]
@@ -55,7 +55,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     obs_4 = p[offset + 6 : offset + 8]
 
     # # ---- Gate-Teil ----------------------------
-    # gates = p[offset + 8 :]
+    gates = p[offset + 8 :]
 
     # Extract variables from state / input
     position = X[0:3]
@@ -63,6 +63,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     control = U[:4]
     theta = X[-1]
     v_theta_cmd = U[-1]
+
 
     # Interpolate trajectory at current theta
     pd_theta = _piecewise_linear_interp(theta, theta_grid, pd_list)
@@ -82,25 +83,26 @@ def create_acados_model(parameters: dict) -> AcadosModel:
         + (mpcc_config.q_contour) * cs.dot(e_contour, e_contour)
         + attitude.T @ Q_w @ attitude
     )
-    
+
     # Control smoothness cost
-    R_df = cs.DM(np.diag([mpcc_config.r_thrust, mpcc_config.r_roll, mpcc_config.r_pitch, mpcc_config.r_yaw]))
+    R_df = cs.DM(
+        np.diag([mpcc_config.r_thrust, mpcc_config.r_roll, mpcc_config.r_pitch, mpcc_config.r_yaw])
+    )
     smooth_cost = control.T @ R_df @ control
-    
-    # Speed incentive (maximize progress, but slow near gates)
-    speed_cost = -mpcc_config.mu_speed * v_theta_cmd 
+
+    # Speed incentive (maximize progress)
+    speed_cost = -mpcc_config.mu_speed * v_theta_cmd
 
     stage_cost = track_cost + smooth_cost + speed_cost
-
 
     # Set cost expressions
     model.cost_expr_ext_cost = stage_cost
 
-    # Obstacle-Constraint-Funktion 
-    r1 = 0.15**2 - ((position[0] - obs_1[0]) ** 2 + (position[1] - obs_1[1]) ** 2)
-    r2 = 0.15**2 - ((position[0] - obs_2[0]) ** 2 + (position[1] - obs_2[1]) ** 2)
-    r3 = 0.15**2 - ((position[0] - obs_3[0]) ** 2 + (position[1] - obs_3[1]) ** 2)
-    r4 = 0.15**2 - ((position[0] - obs_4[0]) ** 2 + (position[1] - obs_4[1]) ** 2)
+    # Obstacle-Constraint-Funktion
+    r1 = 0.1**2 - ((position[0] - obs_1[0]) ** 2 + (position[1] - obs_1[1]) ** 2)
+    r2 = 0.1**2 - ((position[0] - obs_2[0]) ** 2 + (position[1] - obs_2[1]) ** 2)
+    r3 = 0.1**2 - ((position[0] - obs_3[0]) ** 2 + (position[1] - obs_3[1]) ** 2)
+    r4 = 0.1**2 - ((position[0] - obs_4[0]) ** 2 + (position[1] - obs_4[1]) ** 2)
 
     # # Gate-Constraints (inside inner OR outside outer)
     # r_i = 0.10  # inner radius
@@ -138,7 +140,6 @@ def create_acados_model(parameters: dict) -> AcadosModel:
 
     # gate_h = cs.vertcat(*gate_h_list)
 
-    # model.con_h_expr = cs.vertcat(r1, r2, r3, r4, gate_h)
     model.con_h_expr = cs.vertcat(r1, r2, r3, r4)
 
     return model
@@ -188,27 +189,16 @@ def create_ocp_solver(
     ocp.constraints.ubu = np.array([10.0, 10.0, 10.0, 10.0, 3.0])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
-    # # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
-    # ocp.constraints.constr_type = "BGH"
-    # ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3, -1e1, -1e1, -1e1, -1e1])
-    # ocp.constraints.uh = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    # ocp.constraints.idxsh = np.array([0, 1, 2, 3, 4, 5, 6, 7])
-    # nsbx = ocp.constraints.idxsh.shape[0]
-    # ocp.cost.Zl = 0 * np.ones((nsbx,))
-    # ocp.cost.Zu = np.array([500] * 4 + [500] * 4)
-    # ocp.cost.zl = 0 * np.ones((nsbx,))
-    # ocp.cost.zu = 0 * np.ones((nsbx,))
-    # # ocp.cost.zu = np.array([350,350,350,350,  1000,1000,1000,1000], dtype=float)
-
+    # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
     ocp.constraints.constr_type = "BGH"
-    ocp.constraints.lh = np.array([-1e3, -1e3, -1e3, -1e3])
-    ocp.constraints.uh = np.array([0.0, 0.0, 0.0, 0.0])
+    ocp.constraints.lh = np.array(4 * [-1e3])
+    ocp.constraints.uh = np.zeros(4)
     ocp.constraints.idxsh = np.array([0, 1, 2, 3])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 0 * np.ones((nsbx,))
-    ocp.cost.Zu = np.array([5000] * 4 )
+    ocp.cost.Zu = np.array([1000] * 4 )
     ocp.cost.zl = 0 * np.ones((nsbx,))
-    ocp.cost.zu = 1000 * np.ones((nsbx,))
+    ocp.cost.zu = np.array([10] * 4 )
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
@@ -223,8 +213,8 @@ def create_ocp_solver(
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
 
-    ocp.solver_options.qp_solver_iter_max = 20
-    ocp.solver_options.nlp_solver_max_iter = 50
+    ocp.solver_options.qp_solver_iter_max = 50
+    ocp.solver_options.nlp_solver_max_iter = 100
 
     # set prediction horizon
     ocp.solver_options.tf = Tf

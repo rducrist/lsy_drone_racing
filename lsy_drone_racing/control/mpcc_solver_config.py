@@ -13,8 +13,8 @@ class MPCCSolverConfig:
 
     # MPCC progress params
     # Tracking cost 
-    q_lag: float = 500.0              # Lag error weight at gates
-    q_contour: float = 50.0          # Contour error weight at gates
+    q_lag: float = 250.0              # Lag error weight at gates
+    q_contour: float = 350.0          # Contour error weight at gates
     q_attitude: float = 1.0 
 
     # Control smoothness
@@ -24,6 +24,7 @@ class MPCCSolverConfig:
     r_yaw: float = 0.50   
     
     mu_speed: float = 1.0 
+
 
     @property
     def dt(self) -> float:

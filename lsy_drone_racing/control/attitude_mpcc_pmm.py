@@ -63,7 +63,7 @@ class PmmMPC(Controller):
 
         # PMM planner
         self._distance_before = 0.3
-        self._distance_after = 0.3
+        self._distance_after = 0.2
         self._generate_gate_waypoints(
             self._pos, self._current_gate_idx, self._distance_before, self._distance_after
         )
@@ -102,7 +102,16 @@ class PmmMPC(Controller):
         self._pd_list_flat = pd_list.reshape(-1)
         self._tp_list_flat = tp_list.reshape(-1)
 
-        self.p = np.concatenate([self._pd_list_flat, self._tp_list_flat, self._obstacles[:, :2].flatten()])
+        # _p_gates = np.hstack((self._gates, self._gates_rpy[:, 2:3]))
+        self.p = np.concatenate(
+            [
+                self._pd_list_flat,
+                self._tp_list_flat,
+                self._obstacles[:, :2].flatten(),
+            ]
+        )
+
+        self._initial_position = self._pos.copy()
 
         # For visualising using drawline()
         self.logger = MPCLogger()
@@ -123,18 +132,25 @@ class PmmMPC(Controller):
         """Computes the control."""
         self._update_obs(obs)
 
+        
+
         # Set initial state x0 for OCP
         x0 = np.concatenate(
-            (self._pos, self._vel,self._rpy, np.array([self._last_f_collective,  self._last_f_cmd]),  self._last_cmd_rpy, np.array([self._last_theta]))
+            (
+                self._pos,
+                self._vel,
+                self._rpy,
+                np.array([self._last_f_collective, self._last_f_cmd]),
+                self._last_cmd_rpy,
+                np.array([self._last_theta]),
+            )
         )
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
         # Warmstart inputs
-        for j in range(self._N+1):
+        for j in range(self._N + 1):
             self._acados_ocp_solver.set(j, "p", self.p)
-        
-        # self._acados_ocp_solver.set(self._N + 1, "p", self.p)
 
         # Solve MPCC
         t_start = time.perf_counter_ns()
@@ -148,9 +164,7 @@ class PmmMPC(Controller):
         self._last_f_cmd = float(x_next[10])
         self._last_cmd_rpy = x_next[11:14]
 
-
         cost = self._acados_ocp_solver.get_cost()
-
 
         predictions = self._extract_predictions()
 
@@ -166,12 +180,10 @@ class PmmMPC(Controller):
             gate_inner_ring=inner_gate_ring,
             gate_outer_ring=outer_gate_ring,
         )
-        cmd = np.array([
-            self._last_cmd_rpy[0],
-            self._last_cmd_rpy[1],
-            self._last_cmd_rpy[2],
-            self._last_f_cmd
-        ], dtype=np.float32)
+        cmd = np.array(
+            [self._last_cmd_rpy[0], self._last_cmd_rpy[1], self._last_cmd_rpy[2], self._last_f_cmd],
+            dtype=np.float32,
+        )
 
         return cmd
 
@@ -218,6 +230,7 @@ class PmmMPC(Controller):
         """Update internal state from observations."""
         self._gates = obs.get("gates_pos")
         self._gates_quat = obs.get("gates_quat")
+        self._gates_rpy = R.from_quat(self._gates_quat).as_euler("xyz")
         self._pos = obs.get("pos")
         self._quat = obs.get("quat")
         self._vel = obs.get("vel")
@@ -276,7 +289,6 @@ class PmmMPC(Controller):
 
         # validate start_gate_idx
         n_gates = len(self._gates)
-        short_after = 0.3  # 0.1 m hinter dem Gate
         for i in range(start_gate_idx, n_gates):
             gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
@@ -288,31 +300,10 @@ class PmmMPC(Controller):
 
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
-
-            # ----- SPECIAL CASE: do NOT fly "after" gate 3 -----
-            if i == 2:
-                # 1) kurzer Punkt direkt hinter Gate 3 (Dip-Punkt)
-                wp_after_short = gate_pos + short_after * gate_forward
-                waypoints.append(wp_after_short)
-
-                # # 2) zurück zum Gate 3 (wieder durch’s Gate)
-                waypoints.append(gate_pos)
-
-                # 3) wieder vor Gate 3 (Richtung Gate 4 ausrichten)
-                waypoints.append(wp_before)
-                # Instead of wp_after, go directly to BEFORE Gate 4
-                if i + 1 < n_gates:
-                    next_gate_pos = self._gates[i + 1]
-                    next_gate_quat = self._gates_quat[i + 1]
-                    R_next = R.from_quat(next_gate_quat).as_matrix()
-                    next_forward = R_next[:, 0]
-
-                    next_wp_before = next_gate_pos - distance_before * next_forward
-                    waypoints.append(next_wp_before)
-                continue  # skip the normal wp_after
-
-            # Otherwise: add normal AFTER waypoint
             waypoints.append(wp_after)
+            if i ==2:
+                wp_safe = wp_after + np.array([0.0,0.0,0.5])
+                waypoints.append(wp_safe)
 
         self._waypoints = np.vstack(waypoints)
 
