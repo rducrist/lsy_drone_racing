@@ -36,13 +36,14 @@ class PmmMPC(Controller):
         """Initializes MPC and pmm planner parameters."""
         super().__init__(obs, info, config)
         self._env_id = config.env.id
-        mpcc_config = MPCCSolverConfig()
+        self._mpcc_config = MPCCSolverConfig()
 
         self._N = 40
         self._T_HORIZON = 0.7
         self._dt = self._T_HORIZON / self._N
 
         self._update_obs(obs)
+        self._initial_position = self._pos.copy()
 
         self.drone_params = load_params("so_rpy_rotor", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
@@ -64,54 +65,25 @@ class PmmMPC(Controller):
         # PMM planner
         self._distance_before = 0.3
         self._distance_after = 0.2
-        self._generate_gate_waypoints(
-            self._pos, self._current_gate_idx, self._distance_before, self._distance_after
-        )
+        self._generate_gate_waypoints(self._distance_before, self._distance_after)
         self._start_vel = self._vel
         self._end_vel = np.array([0.0, 0.0, 0.0])
 
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
-        # Precompute arc length along PMM path for MPCC
-        diffs = np.diff(self._p_pmm, axis=0)
-        seg_lens = np.linalg.norm(diffs, axis=1)
-
-        s_pmm = np.concatenate(([0.0], np.cumsum(seg_lens)))
-        self._delta_theta = mpcc_config.delta_theta
-
-        theta_grid = mpcc_config.theta_grid
-        p_of_theta = interp1d(s_pmm, self._p_pmm, axis=0, kind="linear", fill_value="extrapolate")
-
-        pd_list = p_of_theta(theta_grid)
-        tp_list = np.zeros_like(pd_list)
-
-        # Like in MPCC paper
-        tp_list[1:-1] = (pd_list[2:] - pd_list[:-2]) / (2.0 * self._delta_theta)
-        tp_list[0] = (pd_list[1] - pd_list[0]) / self._delta_theta
-        tp_list[-1] = (pd_list[-1] - pd_list[-2]) / self._delta_theta
-
-        # Normalize
-        tp_norm = np.linalg.norm(tp_list, axis=1, keepdims=True)
-        tp_list = tp_list / (tp_norm + 1e-8)
-
-        self._theta_grid = theta_grid
-        self._pd_list = pd_list
-        self._tp_list = tp_list
-
-        # flattened versions for solver parameters
-        self._pd_list_flat = pd_list.reshape(-1)
-        self._tp_list_flat = tp_list.reshape(-1)
-
-        # _p_gates = np.hstack((self._gates, self._gates_rpy[:, 2:3]))
-        self.p = np.concatenate(
-            [
-                self._pd_list_flat,
-                self._tp_list_flat,
-                self._obstacles[:, :2].flatten(),
-            ]
+        self._parametrize_trajectory(
+            self._p_pmm, self._mpcc_config.theta_grid, self._mpcc_config.delta_theta
         )
 
-        self._initial_position = self._pos.copy()
+        # _p_gates = np.hstack((self._gates, self._gates_rpy[:, 2:3]))
+        self._p = np.concatenate(
+            [self._pd_list, self._tp_list, self._obstacles[:, :2].flatten()]
+        )
+
+        # Replanning params
+        self._last_gate_pos = self._current_gate_pos
+        self._last_gate_idx = self._current_gate_idx
+        self._sensor_range = 0.4
 
         # For visualising using drawline()
         self.logger = MPCLogger()
@@ -132,7 +104,22 @@ class PmmMPC(Controller):
         """Computes the control."""
         self._update_obs(obs)
 
-        
+        # Replan only if gate position actually updated
+        gate_switched = self._current_gate_idx != self._last_gate_idx
+        gate_moved = np.linalg.norm(self._current_gate_pos - self._last_gate_pos) > 0.01
+        committed = np.linalg.norm(self._current_gate_pos - self._pos) < self._sensor_range
+
+        if gate_moved and not gate_switched and not committed:
+            self._replan_trajectory()
+
+            try:
+                theta_proj, _ = self._find_closest_point_linear(self._p_pmm, self._s_pmm, self._pos)
+                self._last_theta = max(self._last_theta, float(theta_proj))
+            except Exception as e:
+                print(f"[MPCC] Warning: could not project theta after replanning: {e}")
+
+        self._last_gate_idx = self._current_gate_idx
+        self._last_gate_pos = self._current_gate_pos.copy()
 
         # Set initial state x0 for OCP
         x0 = np.concatenate(
@@ -148,9 +135,13 @@ class PmmMPC(Controller):
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
-        # Warmstart inputs
+        # Set parameter vector
+        self._p = np.concatenate(
+            [self._pd_list, self._tp_list, self._obstacles[:, :2].flatten()]
+        )
+
         for j in range(self._N + 1):
-            self._acados_ocp_solver.set(j, "p", self.p)
+            self._acados_ocp_solver.set(j, "p", self._p)
 
         # Solve MPCC
         t_start = time.perf_counter_ns()
@@ -160,6 +151,8 @@ class PmmMPC(Controller):
         # Extract next state's theta, vtheta for next iteration
         x_next = self._acados_ocp_solver.get(1, "x")
         self._last_theta = float(x_next[-1])
+        print("last theta ", self._last_theta)
+        print("pd of theta", self._s_pmm[-1])
         self._last_f_collective = float(x_next[9])
         self._last_f_cmd = float(x_next[10])
         self._last_cmd_rpy = x_next[11:14]
@@ -270,26 +263,13 @@ class PmmMPC(Controller):
         self.traj_pos_viz = self._p_pmm[::5]
         self.traj_vel_viz = self._v_pmm[::5]
 
-    def _project_on_pmm_path(self, pos: NDArray[np.floating]) -> tuple[float, int]:
-        """Project current position onto PMM path (in a nearest-neighbor sense) and return (s_cur, index)."""
-        dists = np.linalg.norm(self._p_pmm - pos[None, :], axis=1)
-        idx = int(np.argmin(dists))
-        s_cur = self._s_pmm[idx]
-        return s_cur, idx
-
-    def _generate_gate_waypoints(
-        self,
-        start_pos: NDArray[np.floating],
-        start_gate_idx: int,
-        distance_before: float,
-        distance_after: float,
-    ) -> None:
+    def _generate_gate_waypoints(self, distance_before: float, distance_after: float) -> None:
         """This function generates a set of waypoints for each gate starting from current gate index."""
-        waypoints = [start_pos.copy()]  # start at drone
+        waypoints = [self._initial_position]  # start at drone
 
         # validate start_gate_idx
         n_gates = len(self._gates)
-        for i in range(start_gate_idx, n_gates):
+        for i in range(n_gates):
             gate_pos = self._gates[i]
             gate_quat = self._gates_quat[i]
             R_gate = R.from_quat(gate_quat).as_matrix()
@@ -301,27 +281,25 @@ class PmmMPC(Controller):
             waypoints.append(wp_before)
             waypoints.append(gate_pos)
             waypoints.append(wp_after)
-            if i ==2:
-                wp_safe = wp_after + np.array([0.0,0.0,0.5])
+            if i == 2:
+                wp_safe = wp_after + np.array([0.0, 0.0, 0.5])
                 waypoints.append(wp_safe)
 
         self._waypoints = np.vstack(waypoints)
 
     def _replan_trajectory(self) -> None:
         """Re-generate PMM trajectory when gates move."""
-        self._generate_gate_waypoints(
-            self._pos, self._current_gate_idx, self._distance_before, self._distance_after
-        )
+        self._generate_gate_waypoints(self._distance_before, self._distance_after)
         self._start_vel = self._vel
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
+
+        self._parametrize_trajectory(
+            self._p_pmm, self._mpcc_config.theta_grid, self._mpcc_config.delta_theta
+        )
 
         # Update visualization
         self.traj_pos_viz = self._p_pmm[::5]
         self.traj_vel_viz = self._v_pmm[::5]
-
-        # Reset tick / horizon index
-        self._tick = 0
-        self._tick_max = max(0, len(self._t_pmm) - 1 - self._N)
 
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
@@ -363,3 +341,74 @@ class PmmMPC(Controller):
             ring_outer[i] = (R[i] @ ring_o_gate.T).T + gate_c[i]
 
         return ring_inner, ring_outer
+
+    def _find_closest_point_linear(
+        self,
+        p_points: np.ndarray,  # (N, 3)
+        s_points: np.ndarray,  # (N,)
+        position: np.ndarray,
+    ) -> tuple[float, np.ndarray]:
+        """
+        Exact projection of a point onto a piecewise-linear, arc-length
+        parameterized path.
+
+        Returns:
+            theta_proj: arc-length coordinate
+            p_proj: closest point on path
+        """
+        best_dist2 = np.inf
+        best_theta = 0.0
+        best_point = p_points[0]
+
+        for i in range(len(p_points) - 1):
+            p0 = p_points[i]
+            p1 = p_points[i + 1]
+            d = p1 - p0
+            seg_len2 = np.dot(d, d)
+
+            if seg_len2 < 1e-12:
+                continue
+
+            alpha = np.dot(position - p0, d) / seg_len2
+            alpha = np.clip(alpha, 0.0, 1.0)
+
+            p_proj = p0 + alpha * d
+            dist2 = np.dot(position - p_proj, position - p_proj)
+
+            if dist2 < best_dist2:
+                best_dist2 = dist2
+                best_point = p_proj
+                best_theta = s_points[i] + alpha * np.sqrt(seg_len2)
+
+        return best_theta, best_point
+
+    def _parametrize_trajectory(self, pmm_path: NDArray, theta_grid: NDArray, delta_theta: float):
+        # Precompute arc length along PMM path for MPCC
+        diffs = np.diff(pmm_path, axis=0)
+        seg_lens = np.linalg.norm(diffs, axis=1)
+
+        self._s_pmm = np.concatenate(([0.0], np.cumsum(seg_lens)))
+
+        p_of_theta = interp1d(
+            self._s_pmm, pmm_path, axis=0, kind="linear", fill_value="extrapolate"
+        )
+
+        pd_list = p_of_theta(theta_grid)
+        tp_list = np.zeros_like(pd_list)
+
+        # Like in MPCC paper
+        tp_list[1:-1] = (pd_list[2:] - pd_list[:-2]) / (2.0 * delta_theta)
+        tp_list[0] = (pd_list[1] - pd_list[0]) / delta_theta
+        tp_list[-1] = (pd_list[-1] - pd_list[-2]) / delta_theta
+
+        # Normalize
+        tp_norm = np.linalg.norm(tp_list, axis=1, keepdims=True)
+        tp_list = tp_list / (tp_norm + 1e-8)
+
+        theta_grid = theta_grid
+        pd_list = pd_list
+        tp_list = tp_list
+
+        # flattened versions for solver parameters
+        self._pd_list = pd_list.reshape(-1)
+        self._tp_list = tp_list.reshape(-1)

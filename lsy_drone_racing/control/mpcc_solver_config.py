@@ -8,7 +8,7 @@ class MPCCSolverConfig:
     T_horizon: float = 1.0
 
     # MPCC path discretization
-    model_traj_length: float = 9.14
+    model_traj_length: float = 12
     delta_theta: float = 0.05
 
     # MPCC progress params

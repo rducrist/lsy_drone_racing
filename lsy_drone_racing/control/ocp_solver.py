@@ -196,9 +196,9 @@ def create_ocp_solver(
     ocp.constraints.idxsh = np.array([0, 1, 2, 3])
     nsbx = ocp.constraints.idxsh.shape[0]
     ocp.cost.Zl = 0 * np.ones((nsbx,))
-    ocp.cost.Zu = np.array([1000] * 4 )
+    ocp.cost.Zu = np.array([1] * 4 )
     ocp.cost.zl = 0 * np.ones((nsbx,))
-    ocp.cost.zu = np.array([10] * 4 )
+    ocp.cost.zu = np.array([1] * 4 )
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
@@ -208,7 +208,7 @@ def create_ocp_solver(
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
     ocp.solver_options.nlp_solver_type = "SQP_RTI"  # SQP, SQP_RTI
-    ocp.solver_options.tol = 1e-4
+    ocp.solver_options.tol = 1e-6
 
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
