@@ -38,14 +38,14 @@ class PmmMPC(Controller):
         self._env_id = config.env.id
         self._mpcc_config = MPCCSolverConfig()
 
-        self._N = 40
-        self._T_HORIZON = 0.7
+        self._N = self._mpcc_config.N
+        self._T_HORIZON = self._mpcc_config.T_horizon
         self._dt = self._T_HORIZON / self._N
 
         self._update_obs(obs)
         self._initial_position = self._pos.copy()
 
-        self.drone_params = load_params("so_rpy_rotor", config.sim.drone_model)
+        self.drone_params = load_params("so_rpy_rotor_drag", config.sim.drone_model)
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
             self._T_HORIZON, self._N, self.drone_params
         )
@@ -67,7 +67,7 @@ class PmmMPC(Controller):
         self._distance_after = 0.2
         self._generate_gate_waypoints(self._distance_before, self._distance_after)
         self._start_vel = self._vel
-        self._end_vel = np.array([0.0, 0.0, 0.0])
+        self._end_vel = np.array([0.2, 0.0, 0.0])
 
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
@@ -127,17 +127,35 @@ class PmmMPC(Controller):
                 self._pos,
                 self._vel,
                 self._rpy,
-                np.array([self._last_f_collective, self._last_f_cmd]),
+                self._drpy,
+                np.array([self._last_f_collective]),
                 self._last_cmd_rpy,
+                np.array([self._last_f_cmd]),
                 np.array([self._last_theta]),
             )
         )
+
+        if not hasattr(self, "_x_warm"):
+            self._x_warm = [x0.copy() for _ in range(self._N + 1)]
+            self._u_warm = [np.zeros(self._nu) for _ in range(self._N)]
+        else:
+            self._x_warm = self._x_warm[1:] + [self._x_warm[-1]]
+            self._u_warm = self._u_warm[1:] + [self._u_warm[-1]]
+        
+        
+        for i in range(self._N):
+            self._acados_ocp_solver.set(i, "x", self._x_warm[i])
+            self._acados_ocp_solver.set(i, "u", self._u_warm[i])
+        self._acados_ocp_solver.set(self._N, "x", self._x_warm[self._N])
+
+        # Set initial guess
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
         # Set parameter vector
+        self._qc_dyn_from_gates()
         self._p = np.concatenate(
-            [self._pd_list, self._tp_list, self._obstacles[:, :2].flatten()]
+            [self._pd_list, self._tp_list, self._qc_dyn, self._obstacles[:, :2].flatten()]
         )
 
         for j in range(self._N + 1):
@@ -146,16 +164,19 @@ class PmmMPC(Controller):
         # Solve MPCC
         t_start = time.perf_counter_ns()
         u0, cost = self._solve_mpc()
+
+         # Extract solution
+        self._x_warm = [self._acados_ocp_solver.get(i, "x") for i in range(self._N + 1)]
+        self._u_warm = [self._acados_ocp_solver.get(i, "u") for i in range(self._N)]
+
         t_end = time.perf_counter_ns()
 
         # Extract next state's theta, vtheta for next iteration
         x_next = self._acados_ocp_solver.get(1, "x")
         self._last_theta = float(x_next[-1])
-        print("last theta ", self._last_theta)
-        print("pd of theta", self._s_pmm[-1])
-        self._last_f_collective = float(x_next[9])
-        self._last_f_cmd = float(x_next[10])
-        self._last_cmd_rpy = x_next[11:14]
+        self._last_f_collective = float(x_next[12])
+        self._last_f_cmd = float(x_next[16])
+        self._last_cmd_rpy = x_next[13:16]
 
         cost = self._acados_ocp_solver.get_cost()
 
@@ -266,6 +287,7 @@ class PmmMPC(Controller):
     def _generate_gate_waypoints(self, distance_before: float, distance_after: float) -> None:
         """This function generates a set of waypoints for each gate starting from current gate index."""
         waypoints = [self._initial_position]  # start at drone
+        waypoints[0][2] = 0.1
 
         # validate start_gate_idx
         n_gates = len(self._gates)
@@ -282,8 +304,8 @@ class PmmMPC(Controller):
             waypoints.append(gate_pos)
             waypoints.append(wp_after)
             if i == 2:
-                wp_safe = wp_after + np.array([0.0, 0.0, 0.5])
-                waypoints.append(wp_safe)
+                wp_extra = wp_before + np.array([0.0,-0.1,0.4])
+                waypoints.append(wp_extra)
 
         self._waypoints = np.vstack(waypoints)
 
@@ -412,3 +434,16 @@ class PmmMPC(Controller):
         # flattened versions for solver parameters
         self._pd_list = pd_list.reshape(-1)
         self._tp_list = tp_list.reshape(-1)
+
+
+    def _qc_dyn_from_gates(self) -> np.ndarray:
+        # pd_list: (M,3)
+        M = self._mpcc_config.M
+        pdM = self._pd_list.reshape(M, 3)
+        qc = np.zeros(pdM.shape[0], dtype=float)
+        for g in self._gates:
+            d = np.linalg.norm(pdM - g, axis=1)
+            qc = np.maximum(qc, np.exp(-2.0 * d * d))
+        self._qc_dyn = qc
+
+        
