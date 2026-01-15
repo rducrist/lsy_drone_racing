@@ -40,7 +40,8 @@ class PmmMPC(Controller):
 
         self._N = self._mpcc_config.N
         self._T_HORIZON = self._mpcc_config.T_horizon
-        self._dt = self._T_HORIZON / self._N
+        # self._dt = self._T_HORIZON / self._N
+        self._dt = 1/50
 
         self._update_obs(obs)
         self._initial_position = self._pos.copy()
@@ -67,23 +68,18 @@ class PmmMPC(Controller):
         self._distance_after = 0.2
         self._generate_gate_waypoints(self._distance_before, self._distance_after)
         self._start_vel = self._vel
-        self._end_vel = np.array([0.2, 0.0, 0.0])
+        self._end_vel = np.array([0.0, 0.0, 0.0])
 
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
         self._parametrize_trajectory(
             self._p_pmm, self._mpcc_config.theta_grid, self._mpcc_config.delta_theta
         )
-
-        # _p_gates = np.hstack((self._gates, self._gates_rpy[:, 2:3]))
-        self._p = np.concatenate(
-            [self._pd_list, self._tp_list, self._obstacles[:, :2].flatten()]
-        )
-
+        self._qc_dyn_from_gates()
         # Replanning params
         self._last_gate_pos = self._current_gate_pos
         self._last_gate_idx = self._current_gate_idx
-        self._sensor_range = 0.4
+        self._sensor_range = 0.6
 
         # For visualising using drawline()
         self.logger = MPCLogger()
@@ -142,7 +138,6 @@ class PmmMPC(Controller):
             self._x_warm = self._x_warm[1:] + [self._x_warm[-1]]
             self._u_warm = self._u_warm[1:] + [self._u_warm[-1]]
         
-        
         for i in range(self._N):
             self._acados_ocp_solver.set(i, "x", self._x_warm[i])
             self._acados_ocp_solver.set(i, "u", self._u_warm[i])
@@ -153,7 +148,6 @@ class PmmMPC(Controller):
         self._acados_ocp_solver.set(0, "ubx", x0)
 
         # Set parameter vector
-        self._qc_dyn_from_gates()
         self._p = np.concatenate(
             [self._pd_list, self._tp_list, self._qc_dyn, self._obstacles[:, :2].flatten()]
         )
@@ -182,17 +176,12 @@ class PmmMPC(Controller):
 
         predictions = self._extract_predictions()
 
-        inner_gate_ring, outer_gate_ring = self._compute_gate_rings(
-            self._gates, R.from_quat(self._gates_quat).as_matrix(), 0.1, 0.6, 30
-        )
         self.logger.log_step(
             solver_time=(t_end - t_start) * 1e-6,
             cost=cost,
             predictions=predictions,
             state=self._pos,
             control=u0,
-            gate_inner_ring=inner_gate_ring,
-            gate_outer_ring=outer_gate_ring,
         )
         cmd = np.array(
             [self._last_cmd_rpy[0], self._last_cmd_rpy[1], self._last_cmd_rpy[2], self._last_f_cmd],
@@ -217,11 +206,13 @@ class PmmMPC(Controller):
     def episode_callback(self):
         """What has to be called at the end of episode."""
         # self.plotter.plot_solver_times()
-        self.plotter.plot_costs()
+        # self.plotter.plot_costs()
         self._tick = 0
         self._finished = False
         self._last_theta = 0.0
         self._last_vtheta = 0.0
+        self._acados_ocp_solver.reset()
+
 
     # --------------------- Some helper functions --------------
     def _extract_predictions(self) -> NDArray[np.floating]:
@@ -234,6 +225,14 @@ class PmmMPC(Controller):
 
     def _solve_mpc(self) -> tuple[NDArray[np.floating], np.floating]:
         self._acados_ocp_solver.solve()
+        status = self._acados_ocp_solver.get_status()
+
+        if status not in [0, 2]:
+            self._acados_ocp_solver.print_statistics()
+
+            raise RuntimeError(
+                f"acados MPC failed: status={status}"
+            )
 
         u0 = self._acados_ocp_solver.get(0, "u")
         cost = self._acados_ocp_solver.get_cost()
@@ -287,7 +286,8 @@ class PmmMPC(Controller):
     def _generate_gate_waypoints(self, distance_before: float, distance_after: float) -> None:
         """This function generates a set of waypoints for each gate starting from current gate index."""
         waypoints = [self._initial_position]  # start at drone
-        waypoints[0][2] = 0.1
+        take_off_wp = waypoints[0] + np.array([0.0,0.0,0.1])
+        waypoints.append(take_off_wp)
 
         # validate start_gate_idx
         n_gates = len(self._gates)
@@ -312,12 +312,14 @@ class PmmMPC(Controller):
     def _replan_trajectory(self) -> None:
         """Re-generate PMM trajectory when gates move."""
         self._generate_gate_waypoints(self._distance_before, self._distance_after)
-        self._start_vel = self._vel
+        self._start_vel = np.zeros(3)
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
         self._parametrize_trajectory(
             self._p_pmm, self._mpcc_config.theta_grid, self._mpcc_config.delta_theta
         )
+
+        self._qc_dyn_from_gates()
 
         # Update visualization
         self.traj_pos_viz = self._p_pmm[::5]
@@ -326,43 +328,9 @@ class PmmMPC(Controller):
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
 
-    def _compute_gate_rings(
-        self, gate_c, R, r_i, r_o, n_pts=60
-    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """Compute inner and outer annulus rings of a gate in world frame.
+        self._acados_ocp_solver.reset()
 
-        Args:
-            gate_c (array-like, shape (3,)):
-                Gate center in world coordinates
-            R (array-like, shape (3,3)):
-                Rotation matrix from gate frame -> world frame
-                (columns are gate-frame axes in world frame)
-            r_i (float):
-                Inner radius
-            r_o (float):
-                Outer radius
-            n_pts (int):
-                Number of points per ring
-        """
-        beta = np.linspace(0.0, 2.0 * np.pi, n_pts)
 
-        # gate-frame points (X axis is normal to gate plane)
-        ring_i_gate = np.stack(
-            [np.zeros_like(beta), r_i * np.cos(beta), r_i * np.sin(beta)], axis=1
-        )
-
-        ring_o_gate = np.stack(
-            [np.zeros_like(beta), r_o * np.cos(beta), r_o * np.sin(beta)], axis=1
-        )
-
-        ring_inner = np.zeros((4, n_pts, 3))
-        ring_outer = np.zeros((4, n_pts, 3))
-        # transform to world frame
-        for i in range(4):
-            ring_inner[i] = (R[i] @ ring_i_gate.T).T + gate_c[i]
-            ring_outer[i] = (R[i] @ ring_o_gate.T).T + gate_c[i]
-
-        return ring_inner, ring_outer
 
     def _find_closest_point_linear(
         self,
@@ -443,7 +411,7 @@ class PmmMPC(Controller):
         qc = np.zeros(pdM.shape[0], dtype=float)
         for g in self._gates:
             d = np.linalg.norm(pdM - g, axis=1)
-            qc = np.maximum(qc, np.exp(-2.0 * d * d))
+            qc = np.maximum(qc, np.exp(-5.0 * d * d))
         self._qc_dyn = qc
 
         
