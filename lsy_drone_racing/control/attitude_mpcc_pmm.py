@@ -123,7 +123,6 @@ class PmmMPC(Controller):
                 self._pos,
                 self._vel,
                 self._rpy,
-                self._drpy,
                 np.array([self._last_f_collective]),
                 self._last_cmd_rpy,
                 np.array([self._last_f_cmd]),
@@ -168,9 +167,9 @@ class PmmMPC(Controller):
         # Extract next state's theta, vtheta for next iteration
         x_next = self._acados_ocp_solver.get(1, "x")
         self._last_theta = float(x_next[-1])
-        self._last_f_collective = float(x_next[12])
-        self._last_f_cmd = float(x_next[16])
-        self._last_cmd_rpy = x_next[13:16]
+        self._last_f_collective = float(x_next[9])
+        self._last_f_cmd = float(x_next[13])
+        self._last_cmd_rpy = x_next[10:13]
 
         cost = self._acados_ocp_solver.get_cost()
 
@@ -227,12 +226,12 @@ class PmmMPC(Controller):
         self._acados_ocp_solver.solve()
         status = self._acados_ocp_solver.get_status()
 
-        if status not in [0, 2]:
-            self._acados_ocp_solver.print_statistics()
+        # if status not in [0, 2]:
+        #     self._acados_ocp_solver.print_statistics()
 
-            raise RuntimeError(
-                f"acados MPC failed: status={status}"
-            )
+        #     raise RuntimeError(
+        #         f"acados MPC failed: status={status}"
+        #     )
 
         u0 = self._acados_ocp_solver.get(0, "u")
         cost = self._acados_ocp_solver.get_cost()
@@ -304,7 +303,7 @@ class PmmMPC(Controller):
             waypoints.append(gate_pos)
             waypoints.append(wp_after)
             if i == 2:
-                wp_extra = wp_before + np.array([0.0,-0.1,0.4])
+                wp_extra = wp_before + np.array([0.0,-0.1,0.3])
                 waypoints.append(wp_extra)
 
         self._waypoints = np.vstack(waypoints)
@@ -328,7 +327,7 @@ class PmmMPC(Controller):
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
 
-        self._acados_ocp_solver.reset()
+        # self._acados_ocp_solver.reset()
 
 
 

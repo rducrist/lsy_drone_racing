@@ -164,3 +164,102 @@ def symbolic_dynamics_euler(
     Y = cs.vertcat(symbols.pos, symbols.rpy)
 
     return X_dot, X, U
+
+def so_rpy_rotor_drag_first_order(
+    model_rotor_vel: bool = True,
+    *,
+    mass: float,
+    gravity_vec: Array,
+    J: Array,
+    J_inv: Array,
+    thrust_time_coef: Array,
+    acc_coef: Array,
+    cmd_f_coef: Array,
+    rpy_coef: Array,
+    rpy_rates_coef: Array,   # unused but kept for signature compatibility
+    cmd_rpy_coef: Array,
+    drag_linear_coef: Array,
+    drag_square_coef: Array,
+) -> tuple[cs.MX, cs.MX, cs.MX, cs.MX]:
+
+    # --- States ---
+    f_collective = symbols.rotor_vel[0]
+    theta = cs.MX.sym("theta")
+
+    X = cs.vertcat(
+        symbols.pos,        # 0:3
+        symbols.vel,        # 3:6
+        symbols.rpy,        # 6:9
+        f_collective,       # 9
+        symbols.cmd_rpyt,   # 10:14 (r_cmd, p_cmd, y_cmd, f_cmd)
+        theta               # 14
+    )
+
+    # --- Inputs ---
+    cmd_drpy = cs.MX.sym("cmd_drpy", 3)
+    cmd_dthrust = cs.MX.sym("cmd_dthrust")
+    cmd_v_theta = cs.MX.sym("cmd_v_theta")
+
+    U = cs.vertcat(cmd_drpy, cmd_dthrust, cmd_v_theta)
+
+    # --- Command extraction ---
+    cmd_rpy = X[10:13]
+    f_cmd   = X[13]
+
+    rot = rotation.cs_rpy2matrix(symbols.rpy)
+
+    # --- Thrust dynamics ---
+    df_collective = (f_cmd - f_collective) / thrust_time_coef
+
+    # --- Force model ---
+    forces_motor_vec = cs.vertcat(
+        0,
+        0,
+        acc_coef + cmd_f_coef * f_collective
+    )
+
+    # --- Translational dynamics ---
+    pos_dot = symbols.vel
+
+    vel_dot = (
+        rot @ forces_motor_vec / mass
+        + gravity_vec
+        + drag_linear_coef / mass * symbols.vel
+        + drag_square_coef / mass * symbols.vel * cs.fabs(symbols.vel)
+    )
+
+    # --- FIRST-ORDER RPY DYNAMICS ---
+    # rpy_dot = A * rpy + B * rpy_cmd
+
+    rpy_coef_fo     = -rpy_coef / rpy_rates_coef
+    cmd_rpy_coef_fo = -cmd_rpy_coef / rpy_rates_coef
+
+    rpy_dot = rpy_coef_fo * symbols.rpy + cmd_rpy_coef_fo * cmd_rpy
+
+    # acc_coef = 0.0
+    # cmd_f_coef = 0.98023254
+    # thrust_time_coef = 0.07993871
+    # drag_linear_coef = -0.02149163
+    # drag_square_coef = -0.02359736
+    # rpy_coef = [-188.9910, -188.9910, -138.3109]
+    # rpy_rates_coef = [-12.7803, -12.7803, -16.8485]
+    # cmd_rpy_coef = [138.0834, 138.0834, 198.5161]
+
+    # --- Command integrators ---
+    cmd_rpy_dot = cmd_drpy
+    f_cmd_dot   = cmd_dthrust
+
+    # --- State derivative ---
+    X_dot = cs.vertcat(
+        pos_dot,
+        vel_dot,
+        rpy_dot,
+        df_collective,
+        cmd_rpy_dot,
+        f_cmd_dot,
+        cmd_v_theta
+    )
+
+    Y = cs.vertcat(symbols.pos, symbols.rpy)
+
+    return X_dot, X, U

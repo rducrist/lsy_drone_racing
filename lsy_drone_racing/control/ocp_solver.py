@@ -5,7 +5,7 @@ from __future__ import annotations  # Python 3.10 type hints
 import numpy as np
 import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from lsy_drone_racing.control.mpcc_model import symbolic_dynamics_euler_mpcc_so_rpy_rotor, symbolic_dynamics_euler
+from lsy_drone_racing.control.mpcc_model import so_rpy_rotor_drag_first_order
 import casadi as cs
 from lsy_drone_racing.control.mpcc_solver_config import MPCCSolverConfig
 
@@ -14,7 +14,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
 
     mpcc_config = MPCCSolverConfig()
-    X_dot, X, U = symbolic_dynamics_euler(
+    X_dot, X, U = so_rpy_rotor_drag_first_order(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
         J=parameters["J"],
@@ -52,10 +52,10 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     qc_dyn = p[6*M:7*M]
     offset = 2 * M * 3 + M
     # ---- Obstacle-Teil ----------------------------
-    # obs_1 = p[offset : offset + 2]
-    # obs_2 = p[offset + 2 : offset + 4]
-    # obs_3 = p[offset + 4 : offset + 6]
-    # obs_4 = p[offset + 6 : offset + 8]
+    obs_1 = p[offset : offset + 2]
+    obs_2 = p[offset + 2 : offset + 4]
+    obs_3 = p[offset + 4 : offset + 6]
+    obs_4 = p[offset + 6 : offset + 8]
 
     # # ---- Gate-Teil ----------------------------
 
@@ -107,13 +107,13 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     # Set cost expressions
     model.cost_expr_ext_cost = stage_cost
 
-    # # Obstacle-Constraint-Funktion
-    # r1 = 0.15**2 - ((position[0] - obs_1[0]) ** 2 + (position[1] - obs_1[1]) ** 2)
-    # r2 = 0.15**2 - ((position[0] - obs_2[0]) ** 2 + (position[1] - obs_2[1]) ** 2)
-    # r3 = 0.15**2 - ((position[0] - obs_3[0]) ** 2 + (position[1] - obs_3[1]) ** 2)
-    # r4 = 0.15**2 - ((position[0] - obs_4[0]) ** 2 + (position[1] - obs_4[1]) ** 2)
+    # Obstacle-Constraint-Funktion
+    r1 = 0.2**2 - ((position[0] - obs_1[0]) ** 2 + (position[1] - obs_1[1]) ** 2)
+    r2 = 0.2**2 - ((position[0] - obs_2[0]) ** 2 + (position[1] - obs_2[1]) ** 2)
+    r3 = 0.2**2 - ((position[0] - obs_3[0]) ** 2 + (position[1] - obs_3[1]) ** 2)
+    r4 = 0.2**2 - ((position[0] - obs_4[0]) ** 2 + (position[1] - obs_4[1]) ** 2)
 
-    # model.con_h_expr = cs.vertcat(r1, r2, r3, r4)
+    model.con_h_expr = cs.vertcat(r1, r2, r3, r4)
 
     return model
 
@@ -154,41 +154,41 @@ def create_ocp_solver(
     thrust_max = parameters["thrust_max"] * 4
     ocp.constraints.lbx = np.array([thrust_min, thrust_min, -1.57, -1.57, -1.57])
     ocp.constraints.ubx = np.array([thrust_max, thrust_max, 1.57, 1.57, 1.57])
-    ocp.constraints.idxbx = np.array([12, 16, 13, 14, 15])
+    ocp.constraints.idxbx = np.array([9, 13, 10, 11, 12])
 
     # Input constraints
     # [df_cmd, dr_cmd, dp_cmd, dy_cmd, v_theta_cmd]
     ocp.constraints.lbu = np.array([-10.0, -10.0, -10.0, -10.0, 0.0])
-    ocp.constraints.ubu = np.array([10.0, 10.0, 10.0, 10.0,3.0])
+    ocp.constraints.ubu = np.array([10.0, 10.0, 10.0, 10.0,1.3])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
-    # # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
-    # ocp.constraints.constr_type = "BGH"
-    # ocp.constraints.lh = np.array(4 * [-1e3])
-    # ocp.constraints.uh = np.zeros(4)
-    # ocp.constraints.idxsh = np.array([0, 1, 2, 3])
-    # nsbx = ocp.constraints.idxsh.shape[0]
-    # ocp.cost.Zl = 0 * np.ones((nsbx,))
-    # ocp.cost.Zu = np.array([0] * 4 )
-    # ocp.cost.zl = 0 * np.ones((nsbx,))
-    # ocp.cost.zu = np.array([0] * 4 )
+    # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
+    ocp.constraints.constr_type = "BGH"
+    ocp.constraints.lh = np.array(4 * [-1e3])
+    ocp.constraints.uh = np.zeros(4)
+    ocp.constraints.idxsh = np.array([0, 1, 2, 3])
+    nsbx = ocp.constraints.idxsh.shape[0]
+    ocp.cost.Zl = 0 * np.ones((nsbx,))
+    ocp.cost.Zu = np.array([200] * 4 )
+    ocp.cost.zl = 0 * np.ones((nsbx,))
+    ocp.cost.zu = np.array([200] * 4 )
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
 
     # Solver Options
-    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
+    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
-    ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
+    ocp.solver_options.nlp_solver_type = "SQP_RTI"  # SQP, SQP_RTI
     ocp.solver_options.tol = 1e-6
 
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
 
     ocp.solver_options.qp_solver_iter_max = 50
-    ocp.solver_options.nlp_solver_max_iter = 3
-    ocp.solver_options.regularize_method = "PROJECT"
+    ocp.solver_options.nlp_solver_max_iter = 10
+    # ocp.solver_options.regularize_method = "PROJECT"
 
     # set prediction horizon
     ocp.solver_options.tf = Tf
