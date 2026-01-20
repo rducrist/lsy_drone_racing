@@ -6,14 +6,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, List
 
-
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
 
 class MPCLogger:
+    """Logger class for controller. Might be used for MPC or MPCC."""
     def __init__(self):
+        """Init log items."""
         self.solver_times: List[float] = []
         self.costs: List[float] = []
         self.predicted_trajs: List[NDArray] = []
@@ -48,9 +49,4 @@ class MPCLogger:
             self.controls.append(control.copy())
         if timestamp is not None:
             self.timestamps.append(timestamp)
-        if gate_inner_ring is not None:
-            self.gate_inner_ring = gate_inner_ring
-        if gate_outer_ring is not None:
-            self.gate_outer_ring = gate_outer_ring    
 
-        

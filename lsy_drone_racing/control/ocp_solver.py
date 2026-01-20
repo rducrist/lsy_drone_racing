@@ -4,23 +4,28 @@ from __future__ import annotations  # Python 3.10 type hints
 
 import casadi as cs
 import numpy as np
-import scipy
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from drone_models.so_rpy import symbolic_dynamics_euler
+
+from lsy_drone_racing.control.mpcc_model import fo_rpy_rotor_drag
+from lsy_drone_racing.control.mpcc_solver_config import MPCCSolverConfig
 
 
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
-    X_dot, X, U, _ = symbolic_dynamics_euler(
+    mpcc_config = MPCCSolverConfig()
+    X_dot, X, U = fo_rpy_rotor_drag(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
         J=parameters["J"],
         J_inv=parameters["J_inv"],
+        thrust_time_coef=parameters["thrust_time_coef"],
         acc_coef=parameters["acc_coef"],
         cmd_f_coef=parameters["cmd_f_coef"],
         rpy_coef=parameters["rpy_coef"],
         rpy_rates_coef=parameters["rpy_rates_coef"],
         cmd_rpy_coef=parameters["cmd_rpy_coef"],
+        drag_linear_coef = parameters["drag_linear_coef"], 
+        drag_square_coef = parameters["drag_square_coef"]
     )
 
     # Initialize the nonlinear model for NMPC formulation
@@ -30,6 +35,82 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     model.f_impl_expr = None
     model.x = X
     model.u = U
+
+    # MPCC Parameters
+    M = mpcc_config.M
+    theta_grid = mpcc_config.theta_grid
+
+    p = cs.MX.sym(
+        "p", 2 * 3 * M + M + 2 * 4 # tp_list, pd_list, q_dyn, obstacles 
+    )  
+    model.p = p
+
+    pd_list = p[0:3*M]
+    tp_list = p[3*M:6*M]
+    qc_dyn = p[6*M:7*M]
+    offset = 2 * M * 3 + M
+   
+   # Parse obstacles
+    obs_1 = p[offset : offset + 2]
+    obs_2 = p[offset + 2 : offset + 4]
+    obs_3 = p[offset + 4 : offset + 6]
+    obs_4 = p[offset + 6 : offset + 8]
+
+
+    # Extract variables from state / input
+    position = X[0:3]
+    attitude = X[6:9]
+    control = U[:4]
+    theta = X[-1]
+    v_theta_cmd = U[-1]
+
+    # Interpolate trajectory at current theta
+    pd_theta = _piecewise_linear_interp(theta, theta_grid, pd_list)
+    tp_theta = _piecewise_linear_interp(theta, theta_grid, tp_list)
+    qc_dyn_theta = _piecewise_linear_interp(theta, theta_grid, qc_dyn, dim=1)
+
+    # Compute tracking errors
+    tp_unit = tp_theta / (cs.norm_2(tp_theta) + 1e-6)
+    e_theta = position - pd_theta
+    e_lag = cs.dot(tp_unit, e_theta) * tp_unit  # Lag error (along path)
+    e_contour = e_theta - e_lag  # Contour error (perpendicular)
+
+    # MPCC Cost Formulation
+
+    Q_w = mpcc_config.q_attitude * cs.DM(np.eye(3))
+    
+    # Lag
+    C_l = mpcc_config.q_lag + mpcc_config.q_lag_peak * qc_dyn_theta
+    lag_cost = C_l * cs.dot(e_lag, e_lag)
+
+    #Contour
+    C_c = mpcc_config.q_contour + mpcc_config.q_contour_peak * qc_dyn_theta
+    contour_cost = C_c * cs.dot(e_contour, e_contour)
+
+    #Attitude
+    attitude_cost = attitude.T @ Q_w @ attitude
+
+    # Control smoothness cost
+    R_df = cs.DM(
+        np.diag([mpcc_config.r_roll, mpcc_config.r_pitch, mpcc_config.r_yaw, mpcc_config.r_thrust])
+    )
+    smooth_cost = control.T @ R_df @ control
+
+    # Speed incentive (maximize progress)
+    speed_cost = -mpcc_config.mu_speed * v_theta_cmd
+
+    stage_cost = lag_cost + contour_cost + attitude_cost + smooth_cost + speed_cost
+
+    # Set cost expressions
+    model.cost_expr_ext_cost = stage_cost
+
+    # Obstacle Constraints
+    r1 = 0.2**2 - ((position[0] - obs_1[0]) ** 2 + (position[1] - obs_1[1]) ** 2)
+    r2 = 0.2**2 - ((position[0] - obs_2[0]) ** 2 + (position[1] - obs_2[1]) ** 2)
+    r3 = 0.2**2 - ((position[0] - obs_3[0]) ** 2 + (position[1] - obs_3[1]) ** 2)
+    r4 = 0.2**2 - ((position[0] - obs_4[0]) ** 2 + (position[1] - obs_4[1]) ** 2)
+
+    model.con_h_expr = cs.vertcat(r1, r2, r3, r4)
 
     return model
 
@@ -44,172 +125,43 @@ def create_ocp_solver(
     ocp.model = create_acados_model(parameters)
 
     # Get Dimensions
-    nx = ocp.model.x.rows()
-    nu = ocp.model.u.rows()
-    ny = nx + nu
-    ny_e = nx
+    nx = ocp.model.x.rows()  
+    np_param = ocp.model.p.rows() 
+
+    ocp.dims.np = np_param
+    ocp.parameter_values = np.zeros((np_param,))
 
     # Set dimensions
     ocp.solver_options.N_horizon = N
 
-    ## Set Cost
-    # For more Information regarding Cost Function Definition in Acados:
-    # https://github.com/acados/acados/blob/main/docs/problem_formulation/problem_formulation_ocp_mex.pdf
-    #
-
     # Cost Type
-    ocp.cost.cost_type = "LINEAR_LS"
-    ocp.cost.cost_type_e = "LINEAR_LS"
-
-    # Weights
-    # State weights
-    Q = np.diag(
-        [
-            30.0,  # pos
-            30.0,  # pos
-            100.0,  # pos
-            1.0,  # rpy
-            1.0,  # rpy
-            1.0,  # rpy
-            10.0,  # vel
-            10.0,  # vel
-            50.0,  # vel
-            5.0,  # drpy
-            5.0,  # drpy
-            5.0,  # drpy
-        ]
-    )
-    # Input weights (reference is upright orientation and hover thrust)
-    R = np.diag(
-        [
-            1.0,  # rpy
-            1.0,  # rpy
-            1.0,  # rpy
-            10.0,  # thrust
-        ]
-    )
-
-    # -------- Cost formulation --------------------
-    Q_e = Q.copy()
-    ocp.cost.W = scipy.linalg.block_diag(Q, R)
-    ocp.cost.W_e = Q_e
-
-    Vx = np.zeros((ny, nx))
-    Vx[0:nx, 0:nx] = np.eye(nx)  # Select all states
-    ocp.cost.Vx = Vx
-
-    Vu = np.zeros((ny, nu))
-    Vu[nx : nx + nu, :] = np.eye(nu)  # Select all actions
-    ocp.cost.Vu = Vu
-
-    Vx_e = np.zeros((ny_e, nx))
-    Vx_e[0:nx, 0:nx] = np.eye(nx)  # Select all states
-    ocp.cost.Vx_e = Vx_e
-
-    # Set initial references (we will overwrite these later on to make the controller track the traj.)
-    ocp.cost.yref, ocp.cost.yref_e = np.zeros((ny,)), np.zeros((ny_e,))
+    ocp.cost.cost_type = "EXTERNAL"
 
     # ----------- Constraint formulation ---------------
 
-    # Set State Constraints (rpy < 30°)
-    ocp.constraints.lbx = np.array([-1e3, -1e3, -1e3, -0.5, -0.5, -0.5])
-    ocp.constraints.ubx = np.array([1e3, 1e3, 1e3, 0.5, 0.5, 0.5])
-    ocp.constraints.idxbx = np.array([0, 1, 2, 3, 4, 5])
+    # [f, f_cmd, r_cmd, p_cmd, y_cmd]
+    thrust_min = parameters["thrust_min"] * 4
+    thrust_max = parameters["thrust_max"] * 4
+    ocp.constraints.lbx = np.array([thrust_min, thrust_min, -1.57, -1.57, -1.57])
+    ocp.constraints.ubx = np.array([thrust_max, thrust_max, 1.57, 1.57, 1.57])
+    ocp.constraints.idxbx = np.array([9, 13, 10, 11, 12])
 
-    # Set Input Constraints (rpy < 30°)
-    ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4])
-    ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
-    ocp.constraints.idxbu = np.array([0, 1, 2, 3])
+    # Input constraints
+    # [df_cmd, dr_cmd, dp_cmd, dy_cmd, v_theta_cmd]
+    ocp.constraints.lbu = np.array([-10.0, -10.0, -10.0, -10.0, 0.0])
+    ocp.constraints.ubu = np.array([10.0, 10.0, 10.0, 10.0,1.3])
+    ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
-    # Set obstacle constraints
-    n_gates = 4
-    n_obs = 4
-
-    gate_c = cs.MX.sym("gate_c", 4, n_gates)   # 4 (pos + yaw) × n_gates
-    obs_c  = cs.MX.sym("obs_c", 2, n_obs)     # 2 × n_obs
-
-    ocp.model.p = cs.vertcat(
-    cs.reshape(gate_c, -1, 1),
-    cs.reshape(obs_c, -1, 1),)
-
-    ocp.parameter_values = np.zeros((4*n_gates + 2*n_obs))
-
-    # obstacles 
-    r_obs = 0.2
-    obs_h_list = []
-
-    for i in range(n_obs):
-        dx = ocp.model.x[0] - obs_c[0, i]
-        dy = ocp.model.x[1] - obs_c[1, i]
-        dist = cs.sqrt(dx**2 + dy**2 )
-        h_obs = (r_obs - dist) / r_obs
-        obs_h_list.append(h_obs)
-
-    obs_h = cs.vertcat(*obs_h_list)
-    
-    # gates 
-    r_i = 0.1
-    r_o = 0.6
-    gate_scale = r_o - r_i
-    # Activation parameters
-    activation_x = 0.2  # Activate ±1.5m from gate plane
-    activation_r = 0.5  # Activate within 1m of gate center axis
-
-    gate_h_list = []
-
-    for i in range(n_gates):
-
-        # gate parameters
-        gx = gate_c[0, i]
-        gy = gate_c[1, i]
-        gz = gate_c[2, i]
-        psi = gate_c[3, i]   # yaw angle
-
-        # relative position in world frame
-        dx_w = ocp.model.x[0] - gx
-        dy_w = ocp.model.x[1] - gy
-        dz_w = ocp.model.x[2] - gz
-
-        # rotation world -> gate frame
-        cos_psi = cs.cos(psi)
-        sin_psi = cs.sin(psi)
-
-        dx_g =  cos_psi * dx_w + sin_psi * dy_w
-        dy_g = -sin_psi * dx_w + cos_psi * dy_w
-        dz_g = dz_w
-
-         # Distance from gate center axis
-        r = dy_g**2 + dz_g**2 
-
-        # Activation: near gate plane AND near gate axis
-        weight_x = activation_x**2 / (dx_g**2 + activation_x**2)
-        weight_r = activation_r**2 / (r**2 + activation_r**2)
-        weight = weight_x * weight_r
-
-        # Normalized complementarity form
-        h_gate = weight * (r - r_i**2) * (r_o**2 - r) / gate_scale**2
-        
-        gate_h_list.append(h_gate)
-
-    gate_h = cs.vertcat(*gate_h_list)
-
-    ocp.model.con_h_expr = cs.vertcat(
-    gate_h,
-    obs_h)
-
+    # Soft Obstacle Constraints
     ocp.constraints.constr_type = "BGH"
-
-    nh = n_gates + n_obs
-
-    ocp.constraints.lh = -1e3 * np.ones(nh)
-    ocp.constraints.uh = 0 * np.ones(nh)
-
-    ocp.constraints.idxsh = np.arange(nh)
-
-    ocp.cost.Zl = 0 * np.ones(nh)
-    ocp.cost.Zu = np.array([5000]*n_gates + [800]*n_obs)
-    ocp.cost.zl = 0 * np.ones(nh)
-    ocp.cost.zu = np.array([10]*n_gates + [10]*n_obs)
+    ocp.constraints.lh = np.array(4 * [-1e3])
+    ocp.constraints.uh = np.zeros(4)
+    ocp.constraints.idxsh = np.array([0, 1, 2, 3])
+    nsbx = ocp.constraints.idxsh.shape[0]
+    ocp.cost.Zl = 0 * np.ones((nsbx,))
+    ocp.cost.Zu = np.array([200] * 4 )
+    ocp.cost.zl = 0 * np.ones((nsbx,))
+    ocp.cost.zu = np.array([200] * 4 )
 
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
@@ -218,17 +170,15 @@ def create_ocp_solver(
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"  # FULL_, PARTIAL_ ,_HPIPM, _QPOASES
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "ERK"
-    ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
-    ocp.solver_options.tol = 1e-4
+    ocp.solver_options.nlp_solver_type = "SQP_RTI"  # SQP, SQP_RTI
+    ocp.solver_options.tol = 1e-6
 
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
 
     ocp.solver_options.qp_solver_iter_max = 50
-    ocp.solver_options.nlp_solver_max_iter = 100
-
-    ocp.solver_options.regularize_method = "CONVEXIFY"
-    ocp.solver_options.globalization_line_search_use_sufficient_descent = 1
+    ocp.solver_options.nlp_solver_max_iter = 10
+    # ocp.solver_options.regularize_method = "PROJECT"
 
     # set prediction horizon
     ocp.solver_options.tf = Tf
@@ -242,3 +192,21 @@ def create_ocp_solver(
     )
 
     return acados_ocp_solver, ocp
+
+
+def _piecewise_linear_interp(theta, theta_vec, flattened_points, dim: int = 3):  # noqa: ANN001, ANN202 # No types because casadi types are hard to handle
+    """CasADi-friendly linear interpolation."""
+    M = len(theta_vec)
+    idx_float = (theta - theta_vec[0]) / (theta_vec[-1] - theta_vec[0]) * (M - 1)
+
+    idx_low = cs.floor(idx_float)
+    idx_high = idx_low + 1
+    alpha = idx_float - idx_low
+
+    idx_low = cs.if_else(idx_low < 0, 0, idx_low)
+    idx_high = cs.if_else(idx_high >= M, M - 1, idx_high)
+
+    p_low = cs.vertcat(*[flattened_points[dim * idx_low + i] for i in range(dim)])
+    p_high = cs.vertcat(*[flattened_points[dim * idx_high + i] for i in range(dim)])
+
+    return (1.0 - alpha) * p_low + alpha * p_high

@@ -1,6 +1,8 @@
+"""This is our pre-challenge controller. It tracks a dynamically computed cubic spline using PD control."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
@@ -15,6 +17,7 @@ class StateController(Controller):
     """State controller with dynamic trajectory replanning and velocity-matched cubic splines."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
+        """Initialises state controller."""
         super().__init__(obs, info, config)
 
         self._freq = config.env.freq
@@ -157,7 +160,7 @@ class StateController(Controller):
             self._updated_gates_history.append(np.array(self._last_known_gates))
 
     # -------------------------------------------------------------------------
-    def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None):
+    def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None) -> NDArray[np.floating]:
         """PD tracking of cubic spline trajectory with velocity-matched start."""
         self._pos_current = np.array(obs.get("pos", np.zeros(3)))
         self._vel_current = np.array(obs.get("vel", np.zeros(3)))
@@ -219,7 +222,16 @@ class StateController(Controller):
         return action
 
     # -------------------------------------------------------------------------
-    def step_callback(self, action, obs, reward, terminated, truncated, info):
+    def step_callback(
+        self,
+        action: NDArray[np.floating],
+        obs: dict[str, NDArray[np.floating]],
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: dict,
+    ) -> bool:
+        """Done each step."""
         self._tick += 1
         if "pos" in obs:
             self._actual_positions.append(obs["pos"].copy())
@@ -227,6 +239,7 @@ class StateController(Controller):
 
     # -------------------------------------------------------------------------
     def episode_callback(self):
+        """Done each episode."""
         self.plot_desired_trajectory()
         self._tick = 0
         self._actual_positions.clear()
