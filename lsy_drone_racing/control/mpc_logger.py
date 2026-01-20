@@ -6,14 +6,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, List
 
-
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
 
 class MPCLogger:
+    """Logger class for controller. Might be used for MPC or MPCC."""
     def __init__(self):
+        """Init log items."""
         self.solver_times: List[float] = []
         self.costs: List[float] = []
         self.predicted_trajs: List[NDArray] = []

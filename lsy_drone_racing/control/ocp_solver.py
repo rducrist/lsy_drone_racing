@@ -2,17 +2,16 @@
 
 from __future__ import annotations  # Python 3.10 type hints
 
-import numpy as np
-import scipy
-from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from lsy_drone_racing.control.mpcc_model import so_rpy_rotor_drag_first_order
 import casadi as cs
+import numpy as np
+from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
+
+from lsy_drone_racing.control.mpcc_model import so_rpy_rotor_drag_first_order
 from lsy_drone_racing.control.mpcc_solver_config import MPCCSolverConfig
 
 
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
-
     mpcc_config = MPCCSolverConfig()
     X_dot, X, U = so_rpy_rotor_drag_first_order(
         mass=parameters["mass"],
@@ -38,26 +37,25 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     model.u = U
 
     # MPCC Parameters
-
     M = mpcc_config.M
     theta_grid = mpcc_config.theta_grid
 
     p = cs.MX.sym(
-        "p", 2 * 3 * M +M + 2 * 4 
-    )  # für MPCC 9 + 8 (4 Hindernisse mit je 2D Position) + 16 (4 Gates mit je 4 Werten)
+        "p", 2 * 3 * M + M + 2 * 4 # tp_list, pd_list, q_dyn, obstacles 
+    )  
     model.p = p
 
     pd_list = p[0:3*M]
     tp_list = p[3*M:6*M]
     qc_dyn = p[6*M:7*M]
     offset = 2 * M * 3 + M
-    # ---- Obstacle-Teil ----------------------------
+   
+   # Parse obstacles
     obs_1 = p[offset : offset + 2]
     obs_2 = p[offset + 2 : offset + 4]
     obs_3 = p[offset + 4 : offset + 6]
     obs_4 = p[offset + 6 : offset + 8]
 
-    # # ---- Gate-Teil ----------------------------
 
     # Extract variables from state / input
     position = X[0:3]
@@ -65,7 +63,6 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     control = U[:4]
     theta = X[-1]
     v_theta_cmd = U[-1]
-
 
     # Interpolate trajectory at current theta
     pd_theta = _piecewise_linear_interp(theta, theta_grid, pd_list)
@@ -78,7 +75,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     e_lag = cs.dot(tp_unit, e_theta) * tp_unit  # Lag error (along path)
     e_contour = e_theta - e_lag  # Contour error (perpendicular)
 
-    # MPCC Stage Cost
+    # MPCC Cost Formulation
 
     Q_w = mpcc_config.q_attitude * cs.DM(np.eye(3))
     
@@ -107,7 +104,7 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     # Set cost expressions
     model.cost_expr_ext_cost = stage_cost
 
-    # Obstacle-Constraint-Funktion
+    # Obstacle Constraints
     r1 = 0.2**2 - ((position[0] - obs_1[0]) ** 2 + (position[1] - obs_1[1]) ** 2)
     r2 = 0.2**2 - ((position[0] - obs_2[0]) ** 2 + (position[1] - obs_2[1]) ** 2)
     r3 = 0.2**2 - ((position[0] - obs_3[0]) ** 2 + (position[1] - obs_3[1]) ** 2)
@@ -128,9 +125,8 @@ def create_ocp_solver(
     ocp.model = create_acados_model(parameters)
 
     # Get Dimensions
-    nx = ocp.model.x.rows()  # 14
-    nu = ocp.model.u.rows()  # 5
-    np_param = ocp.model.p.rows()  # 33
+    nx = ocp.model.x.rows()  
+    np_param = ocp.model.p.rows() 
 
     ocp.dims.np = np_param
     ocp.parameter_values = np.zeros((np_param,))
@@ -138,14 +134,8 @@ def create_ocp_solver(
     # Set dimensions
     ocp.solver_options.N_horizon = N
 
-    ## Set Cost
-    # For more Information regarding Cost Function Definition in Acados:
-    # https://github.com/acados/acados/blob/main/docs/problem_formulation/problem_formulation_ocp_mex.pdf
-    #
-
     # Cost Type
     ocp.cost.cost_type = "EXTERNAL"
-    # ocp.cost.cost_type_e = "EXTERNAL"
 
     # ----------- Constraint formulation ---------------
 
@@ -162,7 +152,7 @@ def create_ocp_solver(
     ocp.constraints.ubu = np.array([10.0, 10.0, 10.0, 10.0,1.3])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
 
-    # Obstacle constraints: BGH mit model.con_h_expr aus create_acados_model
+    # Soft Obstacle Constraints
     ocp.constraints.constr_type = "BGH"
     ocp.constraints.lh = np.array(4 * [-1e3])
     ocp.constraints.uh = np.zeros(4)
@@ -204,7 +194,7 @@ def create_ocp_solver(
     return acados_ocp_solver, ocp
 
 
-def _piecewise_linear_interp(theta, theta_vec, flattened_points, dim: int = 3):
+def _piecewise_linear_interp(theta, theta_vec, flattened_points, dim: int = 3):  # noqa: ANN001, ANN202 # No types because casadi types are hard to handle
     """CasADi-friendly linear interpolation."""
     M = len(theta_vec)
     idx_float = (theta - theta_vec[0]) / (theta_vec[-1] - theta_vec[0]) * (M - 1)

@@ -1,10 +1,9 @@
-"""This module implements an example MPC using attitude control for a quadrotor.
+"""This module implements a Model Predictive Contouring Control (MPCC) framework for quadrotor flight using attitude-level control.
 
-It utilizes the collective thrust interface for drone control to compute control commands based on
-current state observations and desired waypoints.
-
-The waypoints are generated using cubic spline interpolation from a set of predefined waypoints.
-Note that the trajectory uses pre-defined waypoints instead of dynamically generating a good path.
+A Point Mass Model(PMM) planner generates a time optimal
+reference trajectory through gate centers, which is reparameterized and tracked
+by an MPCC. The controller supports online replanning, soft gate and obstacle costs, and is designed for drone racing
+scenarios with moving gates.
 """
 
 from __future__ import annotations  # Python 3.10 type hints
@@ -22,27 +21,27 @@ from scipy.spatial.transform import Rotation as R
 from lsy_drone_racing.control import Controller
 from lsy_drone_racing.control.mpc_logger import MPCLogger
 from lsy_drone_racing.control.mpc_plotter import MPCPlotter
-from lsy_drone_racing.control.ocp_solver import create_ocp_solver
 from lsy_drone_racing.control.mpcc_solver_config import MPCCSolverConfig
+from lsy_drone_racing.control.ocp_solver import create_ocp_solver
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-class PmmMPC(Controller):
-    """Trajectory-generating MPC using attitude control with soft gate/obstacle costs."""
+class MPCC_PMM(Controller):
+    """Trajectory-generating MPCC using attitude control with soft gate/obstacle costs."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
-        """Initializes MPC and pmm planner parameters."""
+        """Initializes MPCC and PMM planner parameters."""
         super().__init__(obs, info, config)
         self._env_id = config.env.id
         self._mpcc_config = MPCCSolverConfig()
 
         self._N = self._mpcc_config.N
         self._T_HORIZON = self._mpcc_config.T_horizon
-        # self._dt = self._T_HORIZON / self._N
-        self._dt = 1/50
+        self._dt = self._mpcc_config.dt
 
+        # Get first observations
         self._update_obs(obs)
         self._initial_position = self._pos.copy()
 
@@ -53,22 +52,21 @@ class PmmMPC(Controller):
         self._nx = self._ocp.model.x.rows()
         self._nu = self._ocp.model.u.rows()
 
-        # Hover thrust and last_u
+        # Define hover thrust
         hover_thrust = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
-        # U = [cmd_roll, cmd_pitch, cmd_yaw, cmd_thrust, dvtheta_cmd]
 
-        # MPCC longitudinal progress states (theta, vtheta)
+        # Initialize MPCC progress variables
         self._last_theta = 0.0
         self._last_f_collective = hover_thrust
         self._last_f_cmd = hover_thrust
         self._last_cmd_rpy = np.zeros(3)
 
         # PMM planner
-        self._distance_before = 0.3
-        self._distance_after = 0.2
+        self._distance_before = self._mpcc_config.distance_before
+        self._distance_after = self._mpcc_config.distance_after
         self._generate_gate_waypoints(self._distance_before, self._distance_after)
         self._start_vel = self._vel
-        self._end_vel = np.array([0.0, 0.0, 0.0])
+        self._end_vel = self._mpcc_config.end_vel
 
         self._compute_pmm_traj(self._waypoints, self._start_vel, self._end_vel, self._dt)
 
@@ -79,7 +77,7 @@ class PmmMPC(Controller):
         # Replanning params
         self._last_gate_pos = self._current_gate_pos
         self._last_gate_idx = self._current_gate_idx
-        self._sensor_range = 0.6
+        self._sensor_range = self._mpcc_config.sensor_range
 
         # For visualising using drawline()
         self.logger = MPCLogger()
@@ -108,11 +106,8 @@ class PmmMPC(Controller):
         if gate_moved and not gate_switched and not committed:
             self._replan_trajectory()
 
-            try:
-                theta_proj, _ = self._find_closest_point_linear(self._p_pmm, self._s_pmm, self._pos)
-                self._last_theta = max(self._last_theta, float(theta_proj))
-            except Exception as e:
-                print(f"[MPCC] Warning: could not project theta after replanning: {e}")
+            theta_proj, _ = self._find_closest_point_linear(self._p_pmm, self._s_pmm, self._pos)
+            self._last_theta = max(self._last_theta, float(theta_proj))
 
         self._last_gate_idx = self._current_gate_idx
         self._last_gate_pos = self._current_gate_pos.copy()
@@ -157,12 +152,11 @@ class PmmMPC(Controller):
         # Solve MPCC
         t_start = time.perf_counter_ns()
         u0, cost = self._solve_mpc()
+        t_end = time.perf_counter_ns()
 
-         # Extract solution
+        # Update warmstart
         self._x_warm = [self._acados_ocp_solver.get(i, "x") for i in range(self._N + 1)]
         self._u_warm = [self._acados_ocp_solver.get(i, "u") for i in range(self._N)]
-
-        t_end = time.perf_counter_ns()
 
         # Extract next state's theta, vtheta for next iteration
         x_next = self._acados_ocp_solver.get(1, "x")
@@ -171,8 +165,7 @@ class PmmMPC(Controller):
         self._last_f_cmd = float(x_next[13])
         self._last_cmd_rpy = x_next[10:13]
 
-        cost = self._acados_ocp_solver.get_cost()
-
+        # For visualisation
         predictions = self._extract_predictions()
 
         self.logger.log_step(
@@ -182,6 +175,8 @@ class PmmMPC(Controller):
             state=self._pos,
             control=u0,
         )
+
+        # Build command vector
         cmd = np.array(
             [self._last_cmd_rpy[0], self._last_cmd_rpy[1], self._last_cmd_rpy[2], self._last_f_cmd],
             dtype=np.float32,
@@ -224,14 +219,6 @@ class PmmMPC(Controller):
 
     def _solve_mpc(self) -> tuple[NDArray[np.floating], np.floating]:
         self._acados_ocp_solver.solve()
-        status = self._acados_ocp_solver.get_status()
-
-        # if status not in [0, 2]:
-        #     self._acados_ocp_solver.print_statistics()
-
-        #     raise RuntimeError(
-        #         f"acados MPC failed: status={status}"
-        #     )
 
         u0 = self._acados_ocp_solver.get(0, "u")
         cost = self._acados_ocp_solver.get_cost()
@@ -303,7 +290,7 @@ class PmmMPC(Controller):
             waypoints.append(gate_pos)
             waypoints.append(wp_after)
             if i == 2:
-                wp_extra = wp_before + np.array([0.0,-0.1,0.3])
+                wp_extra = wp_before + np.array([0.0,-0.1,0.3]) # small hack make pmm trajectory feasible
                 waypoints.append(wp_extra)
 
         self._waypoints = np.vstack(waypoints)
@@ -327,24 +314,13 @@ class PmmMPC(Controller):
         # Remember last gate position
         self._last_gate_pos = self._current_gate_pos.copy()
 
-        # self._acados_ocp_solver.reset()
-
-
-
     def _find_closest_point_linear(
         self,
         p_points: np.ndarray,  # (N, 3)
         s_points: np.ndarray,  # (N,)
         position: np.ndarray,
     ) -> tuple[float, np.ndarray]:
-        """
-        Exact projection of a point onto a piecewise-linear, arc-length
-        parameterized path.
-
-        Returns:
-            theta_proj: arc-length coordinate
-            p_proj: closest point on path
-        """
+        """Exact projection of a point onto a piecewise-linear, arc-length parameterized path."""
         best_dist2 = np.inf
         best_theta = 0.0
         best_point = p_points[0]
@@ -403,7 +379,7 @@ class PmmMPC(Controller):
         self._tp_list = tp_list.reshape(-1)
 
 
-    def _qc_dyn_from_gates(self) -> np.ndarray:
+    def _qc_dyn_from_gates(self) -> NDArray:
         # pd_list: (M,3)
         M = self._mpcc_config.M
         pdM = self._pd_list.reshape(M, 3)
