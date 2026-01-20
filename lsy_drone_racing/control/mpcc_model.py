@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import casadi as cs
-from casadi import MX, cos, sin, vertcat
 import drone_models.symbols as symbols
+from casadi import MX, cos, sin, vertcat
 from drone_models.utils import rotation
 
 if TYPE_CHECKING:
@@ -161,11 +161,9 @@ def symbolic_dynamics_euler(
     X_dot = cs.vertcat(
         pos_dot, vel_dot, symbols.drpy, ddrpy, rotor_vel_dot[0], cmd_drpy, cmd_dthrust, cmd_v_theta
     )
-    Y = cs.vertcat(symbols.pos, symbols.rpy)
-
     return X_dot, X, U
 
-def so_rpy_rotor_drag_first_order(
+def fo_rpy_rotor_drag(
     model_rotor_vel: bool = True,
     *,
     mass: float,
@@ -181,7 +179,7 @@ def so_rpy_rotor_drag_first_order(
     drag_linear_coef: Array,
     drag_square_coef: Array,
 ) -> tuple[cs.MX, cs.MX, cs.MX, cs.MX]:
-
+    """First order attitude dynamics version of so_rpy_rotor_drag."""
     # --- States ---
     f_collective = symbols.rotor_vel[0]
     theta = cs.MX.sym("theta")
@@ -260,6 +258,5 @@ def so_rpy_rotor_drag_first_order(
         cmd_v_theta
     )
 
-    Y = cs.vertcat(symbols.pos, symbols.rpy)
 
     return X_dot, X, U
