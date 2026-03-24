@@ -24,21 +24,14 @@ def flatten_dict(obs: dict[str, Any]) -> dict[str, np.ndarray]:
 
 
 class MultiSimNode(Node):
-    def __init__(self, config, external_drone_id: int = 0, action_timeout: float = 5.0):
+    def __init__(self, config, action_timeout: float = 5.0):
         super().__init__("multi_sim")
         self.config = config
-        self.external_drone_id = external_drone_id
         self.action_timeout = action_timeout
 
         self.episode_id = 0
         self.step_id = 0
-        self.pending_action = None
-
-        self.reset_pub = self.create_publisher(EpisodeReset, "/race/reset", 10)
-        self.observation_pub = self.create_publisher(Observations, "/race/observations", 10)
-        self.step_result_pub = self.create_publisher(StepResult, "/race/step_result", 10)
-        self.episode_end_pub = self.create_publisher(EpisodeEnd, "/race/episode_end", 10)
-        self.create_subscription(Action, "/race/action", self.on_action, 10)
+        self.pending_actions: dict[int, np.ndarray] = {}
 
         self.env = gymnasium.make(
             "MultiDroneRacing-v0",
@@ -56,35 +49,60 @@ class MultiSimNode(Node):
         self.n_drones = self.env.unwrapped.sim.n_drones
         self.n_worlds = self.env.unwrapped.sim.n_worlds
 
-    def on_action(self, msg: Action):
+        self.reset_pub = self.create_publisher(EpisodeReset, "/race/reset", 10)
+        self.observation_pub = self.create_publisher(Observations, "/race/observations", 10)
+        self.step_result_pub = self.create_publisher(StepResult, "/race/step_result", 10)
+        self.episode_end_pub = self.create_publisher(EpisodeEnd, "/race/episode_end", 10)
+
+        self.action_subs = []
+        for drone_id in range(self.n_drones):
+            topic = f"/race/drone_{drone_id}/action"
+            self.action_subs.append(
+                self.create_subscription(
+                    Action,
+                    topic,
+                    lambda msg, drone_id=drone_id: self.on_action(msg, drone_id),
+                    10,
+                )
+            )
+
+    def on_action(self, msg: Action, drone_id: int):
         if msg.episode_id != self.episode_id:
             return
         if msg.step_id != self.step_id:
             return
-        if msg.drone_id != self.external_drone_id:
+        if msg.drone_id != drone_id:
             return
-        self.pending_action = np.asarray(msg.action, dtype=np.float32)
+        self.pending_actions[drone_id] = np.asarray(msg.action, dtype=np.float32)
 
-    def wait_for_action(self) -> np.ndarray:
+    def wait_for_actions(self) -> np.ndarray:
         deadline = time.monotonic() + self.action_timeout
+        required = set(range(self.n_drones))
+
         while rclpy.ok():
-            if self.pending_action is not None:
-                action = self.pending_action
-                self.pending_action = None
-                return action
+            if required.issubset(self.pending_actions):
+                actions = np.stack(
+                    [self.pending_actions[i] for i in range(self.n_drones)],
+                    axis=0
+                ).astype(np.float32)
+                self.pending_actions.clear()
+                return actions
+            
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                missing = sorted(required - set(self.pending_actions))
                 raise TimeoutError(
-                    f"Timed out waiting for action at episode={self.episode_id}, step={self.step_id}"
+                    f"Timed out waiting for actions from drones {missing} "
+                    f"at episode={self.episode_id}, step={self.step_id}"
                 )
             rclpy.spin_once(self, timeout_sec=min(0.1, remaining))
+
         raise RuntimeError("ROS shutdown while waiting for action")
     
     def publish_reset(self, obs: dict[str, Any]):
         flat = flatten_dict(obs)
         msg = EpisodeReset()
         msg.episode_id = self.episode_id
-        msg.external_drone_id = self.external_drone_id
         msg.pos = flat["pos"].tolist()
         msg.quat = flat["quat"].tolist()
         msg.vel = flat["vel"].tolist()
@@ -101,7 +119,6 @@ class MultiSimNode(Node):
         msg = Observations()
         msg.episode_id = self.episode_id
         msg.step_id = self.step_id
-        msg.external_drone_id = self.external_drone_id
         msg.pos = flat["pos"].tolist()
         msg.quat = flat["quat"].tolist()
         msg.vel = flat["vel"].tolist()
@@ -148,7 +165,7 @@ class MultiSimNode(Node):
         for _ in range(n_runs):
             self.episode_id += 1
             self.step_id = -1
-            self.pending_action = None
+            self.pending_actions.clear()
 
             obs, info = self.env.reset()
             self.publish_reset(obs)
@@ -162,10 +179,10 @@ class MultiSimNode(Node):
                 self.step_id = i
                 self.publish_observations(obs)
 
-                action = self.wait_for_action()
-                obs, reward, terminated, truncated, info = self.env.step(action)
+                actions = self.wait_for_actions()
+                obs, reward, terminated, truncated, info = self.env.step(actions)
 
-                self.publish_step_result(action, obs, reward, terminated, truncated)
+                self.publish_step_result(actions, obs, reward, terminated, truncated)
 
                 done = terminated | truncated
 
@@ -184,7 +201,6 @@ def simulate(
     config: str = "multi_level0.toml",
     n_runs: int = 1,
     gui: bool | None = None,
-    external_drone_id: int = 0,
     action_timeout: float = 100.0,
 ):
     config = load_config(CONFIG_ROOT / config)
@@ -196,7 +212,6 @@ def simulate(
     rclpy.init()
     node = MultiSimNode(
         config=config,
-        external_drone_id=external_drone_id,
         action_timeout=action_timeout
     )
 

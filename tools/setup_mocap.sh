@@ -9,7 +9,7 @@ fi
 
 if [ ! -d ros_ws/src/drone_racing_msgs/.git ]; then
   echo "[Pixi activation] Cloning motion_capture_tracking..."
-  git clone --recurse-submodules https://github.com/rducrist/drone_racing_msgs.git ros_ws/src/drone_racing_msgs
+  git clone --recurse-submodules https://github.com/rducrist/drone_racing_msgs.git ros_ws/src/drone_racing_msgs 
 fi
 
 if [ ! -f ros_ws/install/setup.sh ]; then

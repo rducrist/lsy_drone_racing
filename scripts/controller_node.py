@@ -8,6 +8,7 @@ from rclpy.node import Node
 
 from lsy_drone_racing.utils import load_config, load_controller
 from drone_racing_msgs.msg import Action, EpisodeEnd, EpisodeReset, Observations, StepResult
+import fire
 
 
 class ControllerNode(Node):
@@ -22,14 +23,28 @@ class ControllerNode(Node):
         self.controller = None
         self.last_action = None
 
-        self.action_pub = self.create_publisher(Action, "/race/action", 10)
+        self.action_pub = self.create_publisher(
+            Action, 
+            f"/race/drone_{self.drone_id}/action", 
+            10)
         self.create_subscription(EpisodeReset, "/race/reset", self.on_reset, 10)
         self.create_subscription(Observations, "/race/observations", self.on_observations, 10)
         self.create_subscription(StepResult, "/race/step_result", self.on_step_result, 10)
         self.create_subscription(EpisodeEnd, "/race/episode_end", self.on_episode_end, 10)
         self.get_logger().info(f"Finished Init Controller {self.drone_id}")
 
+    def _update_n_drones_from_msg(self, msg) -> None:
+        if len(msg.pos) % 3 != 0:
+            raise ValueError(f"Position vector has invalid length {len(msg.pos)}")
+        n_drones = len(msg.pos) // 3
+        if n_drones <= 0:
+            raise ValueError("Received message without any drone positions")
+        if self.drone_id >= n_drones:
+            raise ValueError(f"Configured drone_id={self.drone_id} but message only has {n_drones} drones")
+        self.n_drones = n_drones
+
     def reshape_observations(self, msg):
+        self._update_n_drones_from_msg(msg)
         obs = {
             "pos": np.asarray(msg.pos, dtype=np.float32).reshape(self.n_drones, 3),
             "quat": np.asarray(msg.quat, dtype=np.float32).reshape(self.n_drones, 4),
@@ -57,15 +72,13 @@ class ControllerNode(Node):
         }
     
     def on_reset(self, msg: EpisodeReset):
-        if msg.external_drone_id != self.drone_id:
-            return
         obs = self.reshape_observations(msg)
         info = {}
         self.controller = self.controller_cls(self.drone_obs(obs), info, self.config)
         self.get_logger().info("Reset succeeded")
 
     def on_observations(self, msg: Observations):
-        if msg.external_drone_id != self.drone_id or self.controller is None:
+        if self.controller is None:
             return
         obs = self.reshape_observations(msg)
         info = {}
@@ -87,9 +100,9 @@ class ControllerNode(Node):
         if self.controller is None or self.last_action is None:
             return
         obs = self.reshape_observations(msg)
-        reward = np.asarray(msg.reward, dtype=np.float32)[self.drone_id]
-        terminated = bool(np.asarray(msg.terminated)[self.drone_id])
-        truncated = bool(np.asarray(msg.truncated)[self.drone_id])
+        reward = np.asarray(msg.reward, dtype=np.float32)[0]
+        terminated = bool(np.asarray(msg.terminated)[0])
+        truncated = bool(np.asarray(msg.truncated)[0])
         info = {}
         self.controller.step_callback(
             self.last_action,
@@ -108,14 +121,18 @@ class ControllerNode(Node):
         self.get_logger().info("Episode ended")
 
 
-def main():
+def main(
+        drone_id: int = 0,
+        controller: str = "attitude_controller.py",
+        config: str = "multi_level0.toml"
+):
     project_root = Path(__file__).resolve().parents[1]
 
     rclpy.init()
     node = ControllerNode(
-        controller_path=project_root / "lsy_drone_racing/control/attitude_controller.py",
+        controller_path=project_root / f"lsy_drone_racing/control/{controller}",
         config_path=project_root / "config/multi_level0.toml",
-        drone_id=0,
+        drone_id=drone_id,
         n_drones=1
     )
 
@@ -127,4 +144,4 @@ def main():
         rclpy.shutdown()
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main, serialize=lambda _: None)
