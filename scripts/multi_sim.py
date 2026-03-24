@@ -61,9 +61,17 @@ def simulate(
     )
     # Load the controller module
     if controller is None:
-        controller = config.controller[0]["file"]
-    controller_path = Path(__file__).parents[1] / "lsy_drone_racing/control" / controller
-    controller_cls = load_controller(controller_path)  # This returns a class, not an instance
+        controller_files = [config.controller[0]["file"], config.controller[1]["file"]]                      
+    else:
+        controller_files = [controller, controller]
+
+    controller_classes = []
+
+    for ctrl_file in controller_files:
+        controller_path = Path(__file__).parents[1] / "lsy_drone_racing/control" / ctrl_file
+        controller_classes.append(load_controller(controller_path))  # This returns a class, not an instance
+
+    
     # Create the racing environment
     env: MultiDroneRacingEnv = gymnasium.make(
         "MultiDroneRacing-v0",
@@ -85,20 +93,29 @@ def simulate(
 
     for _ in range(n_runs):  # Run n_runs episodes with the controller
         obs, info = env.reset()
-        controller: Controller = controller_cls(obs, info, config)
+        controllers: list[Controller] = [
+            controller_classes[0](obs, info, config),
+            controller_classes[1](obs, info, config)]
+        
         i = 0
         fps = 60
 
         while True:
             curr_time = i / config.env.freq
+            actions = []
 
-            action = controller.compute_control(obs, info)
-            action = np.array([action] * n_drones * n_worlds, dtype=np.float32)
-            action[1, 0] += 0.2
+            for i, ctrl in enumerate(controllers):
+                drone_obs = {k: v[i] for k, v in obs.items()}
+                drone_info = {k: v[i] for k, v in info.items()} if isinstance(info, dict) else info
+                actions.append(ctrl.compute_control(drone_obs, drone_info))
+
+            action = np.array(actions*n_worlds, dtype=np.float32)
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated | truncated
+
             # Update the controller internal state and models.
-            controller.step_callback(action, obs, reward, terminated, truncated, info)
+            for ctrl in controllers:
+                ctrl.step_callback(action, obs, reward, terminated, truncated, info)
             # Add up reward, collisions
 
             # Synchronize the GUI.
@@ -115,9 +132,10 @@ def simulate(
             if done:
                 break
 
-        controller.episode_callback()  # Update the controller internal state and models.
+        for ctrl in controllers:
+            ctrl.episode_callback()  # Update the controller internal state and models.
+            ctrl.episode_reset()
         log_episode_stats(obs, info, config, curr_time)
-        controller.episode_reset()
 
     # Close the environment
     env.close()
