@@ -143,6 +143,11 @@ scripts = ["tools/setup_mocap.sh"]
 [tool.pixi.activation]
 scripts = ["tools/setup_acados.sh"]
 
+[tool.pixi.tasks]
+multi-sim-node = { cmd = "python scripts/multi_sim_node.py", description = "Run the multi-drone simulator ROS node" }
+controller-node = { cmd = "python scripts/controller_node.py", description = "Run one controller ROS node" }
+manual-competition-example = { cmd = "python scripts/manual_competition_example.py", description = "Open separate terminals for a local multi-repo competition run" }
+
 # feature[online-submission]
 # [tool.pixi.feature.online-submission]
 
