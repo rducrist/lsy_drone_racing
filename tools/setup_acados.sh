@@ -62,7 +62,11 @@ fi
 if [ -f ${ACADOS_DIR}/lib/libacados.so ]; then
   export ACADOS_SOURCE_DIR="$ACADOS_DIR"
   export ACADOS_INSTALL_DIR="$ACADOS_DIR"
-  export LD_LIBRARY_PATH="$ACADOS_DIR/lib"
+  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH="$ACADOS_DIR/lib:$LD_LIBRARY_PATH"
+  else
+    export LD_LIBRARY_PATH="$ACADOS_DIR/lib"
+  fi
   export PATH="${ACADOS_DIR}/interfaces/acados_template:${PATH}"
 fi
 
