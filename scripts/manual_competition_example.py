@@ -33,19 +33,9 @@ def _open_terminal(repo_path: Path, title: str, pixi_command: str) -> subprocess
 
     launcher = _terminal_launcher()
     quoted_repo = shlex.quote(str(repo_path.resolve()))
-    ros_setup = (
-        "if [ -f ros_ws/install/setup.bash ]; then "
-        "source ros_ws/install/setup.bash; "
-        "elif [ -f ros_ws/install/local_setup.bash ]; then "
-        "source ros_ws/install/local_setup.bash; "
-        "else "
-        "echo 'ROS workspace setup file not found under ros_ws/install' >&2; "
-        "fi; "
-    )
     command = (
         f"printf '\\033]0;{title}\\007'; "
         f"cd {quoted_repo} && "
-        f"{ros_setup}"
         f"pixi run -e deploy {pixi_command}; "
         "exec bash"
     )
@@ -75,8 +65,6 @@ def launch(
 
     Notes:
         - Each process runs in its own terminal and therefore in its own Pixi environment.
-        - Each terminal sources `ros_ws/install/setup.bash` first, with a fallback to
-          `ros_ws/install/local_setup.bash`.
         - All commands are executed with `pixi run -e deploy ...`.
         - `sim_args`, `controller_a_args`, and `controller_b_args` are appended after the task name.
         - This is intended for a local Linux desktop session, not for GitHub Actions.

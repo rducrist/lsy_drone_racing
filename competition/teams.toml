@@ -1,0 +1,9 @@
+[[team]]
+name = "team_a"
+path = "/home/radu/Uni/hiwi_lsy/lsy_drone_racing/"
+controller = "attitude_controller.py"
+
+[[team]]
+name = "team_b"
+path = "/home/radu/Uni/hiwi_lsy/second_env/lsy_drone_racing"
+controller = "attitude_controller.py"

@@ -146,7 +146,7 @@ scripts = ["tools/setup_acados.sh"]
 [tool.pixi.tasks]
 multi-sim-node = { cmd = "python scripts/multi_sim_node.py", description = "Run the multi-drone simulator ROS node" }
 controller-node = { cmd = "python scripts/controller_node.py", description = "Run one controller ROS node" }
-manual-competition-example = { cmd = "python scripts/manual_competition_example.py", description = "Open separate terminals for a local multi-repo competition run" }
+run-tournament = { cmd = "python scripts/run_tournament.py", description = "Run all unique team pairs" }
 
 # feature[online-submission]
 # [tool.pixi.feature.online-submission]
