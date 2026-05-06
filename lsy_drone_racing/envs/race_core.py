@@ -174,6 +174,7 @@ class EnvSettings:
     camera: int | str
     cam_config: dict[str, int | list[float]]
     disturbances: dict[str, Callable[[Array, Array, Array], Array]]
+    downwash: dict[str, Any] | None
     randomizations: dict[str, Callable[[Array, Array, Array], Array]]
     device: Device
     autoreset: bool = True  # Can be overridden by single env subclasses
@@ -187,6 +188,7 @@ class EnvSettings:
         camera: int | str,
         cam_config: dict[str, int | list[float]],
         disturbances: dict[str, Callable[[Array, Array, Array], Array]],
+        downwash: dict[str, Any] | None,
         randomizations: dict[str, Callable[[Array, Array, Array], Array]],
         device: Device,
         autoreset: bool = True,
@@ -200,6 +202,7 @@ class EnvSettings:
             camera=camera,
             cam_config=cam_config,
             disturbances=disturbances,
+            downwash=downwash,
             randomizations=randomizations,
             device=device,
             autoreset=autoreset,
@@ -310,6 +313,7 @@ class RaceCoreEnv:
         track: ConfigDict,
         control_mode: Literal["state", "attitude"] = "state",
         disturbances: ConfigDict | None = None,
+        downwash: ConfigDict | None = None,
         randomizations: ConfigDict | None = None,
         seed: int | None = None,
         max_episode_steps: int = 1500,
@@ -326,6 +330,7 @@ class RaceCoreEnv:
             control_mode: Control mode for the drones. See `build_action_space` for details.
             track: Track configuration.
             disturbances: Disturbance configuration.
+            downwash: Downwash configuration.
             randomizations: Randomization configuration.
             seed: None / -1 for a generated seed or the random seed directly.
             max_episode_steps: Maximum number of steps per episode. Needs to be tracked manually for
@@ -373,6 +378,7 @@ class RaceCoreEnv:
         disturbances = {mode: rng_spec2fn(spec) for mode, spec in specs.items()}
         specs = {} if randomizations is None else randomizations
         randomizations = {mode: rng_spec2fn(spec) for mode, spec in specs.items()}
+
         self.settings = EnvSettings.create(
             freq=freq,
             max_episode_steps=max_episode_steps,
@@ -381,6 +387,7 @@ class RaceCoreEnv:
             camera=sim_config.camera,
             cam_config=sim_config.cam_config[0],
             disturbances=disturbances,
+            downwash=downwash,
             randomizations=randomizations,
             device=jax.devices(device)[0],
             autoreset=True,
@@ -635,6 +642,12 @@ class RaceCoreEnv:
         # Build the reset randomizations and disturbances into the sim itself
         self.sim.reset_pipeline = self.sim.reset_pipeline + (build_drone_reset_fn(randomizations),)
         self.sim.build_reset_fn()
+        if downwash := self.settings.downwash:
+            downwash_fn = build_downwash_fn(downwash)
+            self.sim.step_pipeline = (
+                self.sim.step_pipeline[:2] + (downwash_fn,) + self.sim.step_pipeline[2:]
+            )
+            self.sim.build_step_fn()
         if dist := self.settings.disturbances.get("dynamics"):
             disturbance_fn = build_dynamics_disturbance_fn(dist)
             self.sim.step_pipeline = (
@@ -932,3 +945,77 @@ def build_dynamics_disturbance_fn(
         return data.replace(states=states, core=data.core.replace(rng_key=key))
 
     return dynamics_disturbance
+
+
+def build_downwash_fn(config: dict[str, Any]) -> Callable[[SimData], SimData]:
+    """Build a deterministic downwash hook for the simulation step pipeline."""
+    if not config.get("enabled", True):
+        return lambda data: data
+
+    drone_radius = float(config.get("drone_radius", 0.08))
+    cone_factor = float(config.get("cone_factor", 0.1))
+    height = float(config.get("height"))
+    force_scale = float(config.get("force_scale"))
+    torque_scale = float(config.get("torque_scale"))
+    source_weight_scale = float(config.get("source_weight_scale"))
+    z_decay = float(config.get("z_decay"))
+    eps = float(config.get("eps", 1e-6))
+
+    rotor_layout = jp.array(
+        [[1.0, -1.0, 0.0], [-1.0, -1.0, 0.0], [-1.0, 1.0, 0.0], [1.0, 1.0, 0.0]], dtype=jp.float32
+    ) / jp.sqrt(2.0)
+
+    def rotate_by_quat(quat: Array, vec: Array) -> Array:
+        """Rotate vectors from body to world frame using xyzw quaternions."""
+        q_xyz, q_w = quat[..., :3], quat[..., 3:4]
+        return vec + 2.0 * jp.cross(q_xyz, q_w * vec + jp.cross(q_xyz, vec, axis=-1), axis=-1)
+
+    def rotor_offsets(arm_length: Array, quat: Array) -> Array:
+        arm_length = jp.asarray(arm_length)
+        if arm_length.ndim > 0 and arm_length.shape[-1] == 1:
+            arm_length = arm_length[..., 0]
+        arm_length = jp.broadcast_to(arm_length, quat.shape[:-1])
+        offsets_body = arm_length[..., None, None] * rotor_layout
+        return rotate_by_quat(quat[..., None, :], offsets_body)
+
+    def downwash_fn(data: SimData) -> SimData:
+        states = data.states
+        pos = states.pos
+        arm_length = data.params.L
+        rotor_offsets_world = rotor_offsets(arm_length, states.quat)
+        rotor_pos = pos[..., None, :] + rotor_offsets_world
+
+        source = pos[:, :, None, None, :]
+        target = rotor_pos[:, None, :, :, :]
+        rel = target - source
+
+        z = source[..., 2] - target[..., 2]
+        rho = jp.linalg.norm(rel[..., :2], axis=-1)
+        cone_radius = drone_radius + cone_factor * z
+
+        gravity_mag = jp.linalg.norm(data.params.gravity_vec)
+        source_weight = data.params.mass[..., 0][:, :, None, None] * gravity_mag
+        source_weight *= source_weight_scale
+        cone_radius_sq = jp.maximum(cone_radius**2, eps)
+        radial_profile = (1.0 - rho**2 / cone_radius_sq) ** 2
+        force_mag = source_weight * jp.exp(-z_decay * z) * radial_profile
+
+        in_cone = (z > 0.0) & (z < height) & (rho < cone_radius)
+        pair_matrix = jp.eye(pos.shape[1], dtype=bool)[None, :, :, None]
+        force_mag = jp.where(in_cone & ~pair_matrix, force_mag, 0.0)
+
+        rotor_force_z = -jp.sum(force_mag, axis=1) / rotor_layout.shape[0]
+        rotor_forces = jp.zeros_like(rotor_pos).at[..., 2].set(rotor_force_z)
+        downwash_force = force_scale * jp.sum(rotor_forces, axis=2)
+        downwash_torque = torque_scale * jp.sum(
+            jp.cross(rotor_offsets_world, rotor_forces, axis=-1), axis=2
+        )
+
+        states = states.replace(force=downwash_force, torque=downwash_torque)
+
+        jax.debug.print("Force: {force}", force=states.force)
+        jax.debug.print("DW Force: {dw_force}", dw_force=downwash_force)
+        # jax.debug.print("Torque: {torque}", torque=downwash_torque)
+        return data.replace(states=states)
+
+    return downwash_fn

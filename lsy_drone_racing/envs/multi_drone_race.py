@@ -36,6 +36,7 @@ class MultiDroneRaceEnv(RaceCoreEnv, Env):
         sensor_range: float = 0.5,
         control_mode: Literal["state", "attitude"] = "state",
         disturbances: ConfigDict | None = None,
+        downwash: ConfigDict | None = None,
         randomizations: ConfigDict | None = None,
         seed: int | None = None,
         max_episode_steps: int = 1500,
@@ -51,6 +52,7 @@ class MultiDroneRaceEnv(RaceCoreEnv, Env):
             sensor_range: Sensor range.
             control_mode: Control mode for the drones. See `build_action_space` for details.
             disturbances: Disturbance configuration.
+            downwash: Downwash configuration.
             randomizations: Randomization configuration.
             seed: None / -1 for a generated seed or the random seed directly.
             max_episode_steps: Maximum number of steps per episode.
@@ -66,6 +68,7 @@ class MultiDroneRaceEnv(RaceCoreEnv, Env):
             track=track,
             control_mode=control_mode,
             disturbances=disturbances,
+            downwash=downwash,
             randomizations=randomizations,
             seed=seed,
             max_episode_steps=max_episode_steps,
@@ -130,6 +133,7 @@ class VecMultiDroneRaceEnv(RaceCoreEnv, VectorEnv):
         sensor_range: float = 0.5,
         control_mode: Literal["state", "attitude"] = "state",
         disturbances: ConfigDict | None = None,
+        downwash: ConfigDict | None = None,
         randomizations: ConfigDict | None = None,
         seed: int = 1337,
         max_episode_steps: int = 1500,
@@ -145,6 +149,7 @@ class VecMultiDroneRaceEnv(RaceCoreEnv, VectorEnv):
             sensor_range: Sensor range.
             control_mode: Control mode for the drones. See `build_action_space` for details.
             disturbances: Disturbance configuration.
+            downwash: Downwash configuration.
             randomizations: Randomization configuration.
             seed: Random seed.
             max_episode_steps: Maximum number of steps per episode.
@@ -160,6 +165,7 @@ class VecMultiDroneRaceEnv(RaceCoreEnv, VectorEnv):
             track=track,
             control_mode=control_mode,
             disturbances=disturbances,
+            downwash=downwash,
             randomizations=randomizations,
             seed=seed,
             max_episode_steps=max_episode_steps,

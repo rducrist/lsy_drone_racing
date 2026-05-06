@@ -76,7 +76,10 @@ def simulate(
     base_freq = int(np.max(controller_freqs))
     periods = base_freq // controller_freqs  # Precompute the periods for each controller.
     if np.any(base_freq % controller_freqs != 0):
-        raise ValueError(f"Controller frequencies must be multiples ({controller_freqs.tolist()})")
+        raise ValueError(
+            "Controller frequencies do not evenly divide the base frequency "
+            f"({controller_freqs.tolist()})"
+        )
 
     # Create the racing environment
     env: MultiDroneRacingEnv = gymnasium.make(
@@ -87,6 +90,7 @@ def simulate(
         sensor_range=config.env.kwargs[0]["sensor_range"],
         control_mode=config.env.kwargs[0]["control_mode"],
         disturbances=config.env.get("disturbances"),
+        downwash=config.env.get("downwash"),
         randomizations=config.env.get("randomizations"),
         seed=config.env.seed,
     )

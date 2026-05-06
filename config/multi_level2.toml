@@ -117,6 +117,16 @@ fn = "uniform"
 minval = [-0.1, -0.1, -0.1]
 maxval = [0.1, 0.1, 0.1]
 
+[env.downwash]
+enabled = true
+drone_radius = 0.08
+cone_factor = 0.1
+height = 1.0
+force_scale = 1.0
+torque_scale = 1.0
+source_weight_scale = 0.1
+z_decay = 2.0
+
 [env.randomizations.drone_pos]
 fn = "uniform"
 [env.randomizations.drone_pos.kwargs]

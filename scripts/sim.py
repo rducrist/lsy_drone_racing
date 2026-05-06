@@ -66,6 +66,7 @@ def simulate(
         control_mode=config.env.control_mode,
         track=config.env.track,
         disturbances=config.env.get("disturbances"),
+        downwash=config.env.get("downwash"),
         randomizations=config.env.get("randomizations"),
         seed=config.env.seed,
     )
