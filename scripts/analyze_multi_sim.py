@@ -70,8 +70,8 @@ def _plot_trajectory(data: np.lib.npyio.NpzFile, output_file: Path):
     xy_ax.legend(loc="best")
     fig.suptitle("Drone trajectories")
     fig.tight_layout()
+    plt.show()
     fig.savefig(output_file, dpi=200)
-    plt.close(fig)
 
 
 def _plot_wrench(data: np.lib.npyio.NpzFile, output_file: Path):

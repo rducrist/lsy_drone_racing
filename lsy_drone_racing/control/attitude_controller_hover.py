@@ -59,7 +59,7 @@ class AttitudeController(Controller):
 
             ]
         )
-        self._t_total = 3  # s
+        self._t_total = 6  # s
         t = np.linspace(0, self._t_total, len(waypoints))
         self._des_pos_spline = CubicSpline(t, waypoints)
         self._des_vel_spline = self._des_pos_spline.derivative()
@@ -83,7 +83,7 @@ class AttitudeController(Controller):
         """
         t = min(self._tick / self._freq, self._t_total)
         if t >= self._t_total:  # Maximum duration reached
-            self._finished = False
+            self._finished = True
 
         des_pos = self._des_pos_spline(t)
         des_vel = self._des_vel_spline(t)

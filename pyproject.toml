@@ -30,9 +30,9 @@ sim = [
     "gymnasium[array-api] >= 1.2.0",
     "ml-collections >= 1.0",
     "packaging >= 24.0",
-    "drone-models",
-    "drone-controllers",
-    "crazyflow>=0.1.0",
+    "drone-models @ https://github.com/learnsyslab/drone-models.git",
+    "drone-controllers @ https://github.com/learnsyslab/drone-controllers.git",
+    "crazyflow @ https://github.com/learnsyslab/crazyflow.git",
     "jax >= 0.7",
     "warp-lang",
 ]
@@ -73,6 +73,7 @@ cmake = "*"
 compilers = ">=1.9.0, <1.11.0"
 make = "*"
 openblas = ">=0.3.30,<0.4"
+ipython = ">=9.13.0,<10"
 
 [tool.pixi.pypi-dependencies]
 lsy_drone_racing = { path = ".", editable = true }

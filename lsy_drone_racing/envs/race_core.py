@@ -34,7 +34,9 @@ import numpy as np
 from crazyflow.sim import Sim
 from crazyflow.sim.sim import seed_sim, sync_sim2mjx, use_box_collision
 from crazyflow.utils import leaf_replace
-from drone_controllers.mellinger.params import ForceTorqueParams
+
+# from drone_controllers.mellinger.params import ForceTorqueParams
+from drone_models.core import load_params
 from flax.struct import dataclass
 from gymnasium import spaces
 from scipy.spatial.transform import Rotation as R
@@ -220,8 +222,9 @@ def build_action_space(control_mode: Literal["state", "attitude"], drone_model: 
     if control_mode == "state":
         return spaces.Box(low=-np.inf, high=np.inf, shape=(13,))
     if control_mode == "attitude":
-        params = ForceTorqueParams.load(drone_model)
-        thrust_min, thrust_max = params.thrust_min * 4, params.thrust_max * 4
+        params = load_params("first_principles", drone_model)
+        # params = ForceTorqueParams.load(drone_model)
+        thrust_min, thrust_max = params.get("thrust_min") * 4, params.get("thrust_max") * 4
         return spaces.Box(
             np.array([-np.pi / 2, -np.pi / 2, -np.pi / 2, thrust_min], dtype=np.float32),
             np.array([np.pi / 2, np.pi / 2, np.pi / 2, thrust_max], dtype=np.float32),
