@@ -156,6 +156,8 @@ def downwash_force_fn(data: SimData) -> SimData:
     force_body = parasitic_drag - parasitic_drag_still + rotor_drag_summed
     force_world = (rot @ force_body[..., None])[..., 0]
 
-    data = data.replace(states=states.replace(force=force_world, torque=torque_world))
+    data = data.replace(
+        states=states.replace(force=force_world, torque=torque_world)
+    )
 
     return data

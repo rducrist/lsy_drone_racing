@@ -18,6 +18,7 @@ import fire
 import gymnasium
 import jax.numpy as jnp
 import numpy as np
+from analyze_multi_sim import analyze
 from downwash import downwash_force_fn
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 from logger import EpisodeLogger
@@ -196,7 +197,9 @@ def simulate(
         log_episode_stats(obs, info, config, finish_times, controller_names)
 
     # Close the environment
+    analyze()
     env.close()
+    
 
 
 def log_episode_stats(

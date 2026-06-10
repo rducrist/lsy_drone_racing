@@ -4,19 +4,19 @@
 # | :-----------------: | :----------------------------: | :-------------------------: | :---------------: | :-------------------: |
 # | `level2.toml`       | *Yes*                          | *Yes*                       | *No*              | Learning, re-planning |
 [controller]
-file = "attitude_controller_downwashed.py" # Put your controller file name here. Specifying a controller as argument to scripts will override this setting. Controllers are located in `lsy_drone_racing/control/`
+file = "attitude_controller_hover.py" # Put your controller file name here. Specifying a controller as argument to scripts will override this setting. Controllers are located in `lsy_drone_racing/control/`
 
 [deploy]
 ### Settings only relevant for deployment
 # Whether to check if gate and obstacle positions observed by vicon are within the limits defined down below.
-check_race_track = true
+check_race_track = false
 # Whether to check if the drone start position is within the limits specified down below.
 check_drone_start_pos = true
 # Lets you practice your controller without putting up gates & obstacles, assumes nominal positions given below.
 real_track_objects = false
 
 [[deploy.drones]]
-id = 10
+id = 20
 channel = 100
 drone_model = "cf21B_500"                        # Model of the drone, i.e., cf2x_L250, cf2x_P250, cf2x_T500, cf21B_500. For this course, we use cf21B_500
 
@@ -80,7 +80,7 @@ pos = [-1.5, -0.25, 1.55]
 pos = [-0.5, -0.75, 1.55]
 
 [[env.track.drones]]
-pos = [-1.5, 0.75, 0.01]
+pos = [0.0, 0.0, 0.01]
 rpy = [0.0, 0.0, 0.0]
 vel = [0, 0, 0]
 ang_vel = [0, 0, 0]
