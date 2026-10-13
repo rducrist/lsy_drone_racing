@@ -99,6 +99,11 @@ class AttitudeController_1(Controller):
                 # Custom world-coordinate waypoint after the third gate passage.
                 waypoints.append(exit_ + [0.0, 0.0, 0.5])
 
+            if sequence_idx == 3:
+                # Custom world-coordinate waypoint after the third gate passage.
+                waypoints.append([1.6, 0.5, 1.2])
+
+
 
             if i < len(point_at_obstacle) and point_at_obstacle[i] and obstacle_ind[i] < len(obs["obstacles_pos"]):
                 obs_pos = obs["obstacles_pos"][obstacle_ind[i]].copy()
@@ -131,7 +136,7 @@ class AttitudeController_1(Controller):
     def create_spline(self):
         """Create spline interpolation for waypoints."""
         #self._t_total = 7.8  # s Used for submission
-        self._t_total = 20
+        self._t_total = 15
 
         # Distance-based timing
         distances = np.linalg.norm(np.diff(self._waypoints, axis=0), axis=1)
