@@ -50,6 +50,7 @@ class AttitudeController_1(Controller):
         takeoff += [0.6, -0.1, 0.3]
           # lift to 0.5m before going anywhere                                                    
         waypoints.append(takeoff)  
+        waypoints.append([0.0, 0.3, 0.5])
 
         gates_pos = obs["gates_pos"]    # shape (n_gates, 3)
         gates_quat = obs["gates_quat"]  # shape (n_gates, 4), format [x, y, z, w]
@@ -98,6 +99,7 @@ class AttitudeController_1(Controller):
                 # Custom world-coordinate waypoint after the third gate passage.
                 waypoints.append(exit_ + [0.0, 0.0, 0.5])
 
+
             if i < len(point_at_obstacle) and point_at_obstacle[i] and obstacle_ind[i] < len(obs["obstacles_pos"]):
                 obs_pos = obs["obstacles_pos"][obstacle_ind[i]].copy()
                 obs_pos[2] = exit_[2]  # change z pos to previous waypoint
@@ -129,7 +131,7 @@ class AttitudeController_1(Controller):
     def create_spline(self):
         """Create spline interpolation for waypoints."""
         #self._t_total = 7.8  # s Used for submission
-        self._t_total = 15
+        self._t_total = 20
 
         # Distance-based timing
         distances = np.linalg.norm(np.diff(self._waypoints, axis=0), axis=1)
