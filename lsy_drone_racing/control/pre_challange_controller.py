@@ -136,7 +136,7 @@ class AttitudeController_1(Controller):
     def create_spline(self):
         """Create spline interpolation for waypoints."""
         #self._t_total = 7.8  # s Used for submission
-        self._t_total = 15
+        self._t_total = 20
 
         # Distance-based timing
         distances = np.linalg.norm(np.diff(self._waypoints, axis=0), axis=1)
