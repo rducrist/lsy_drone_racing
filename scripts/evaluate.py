@@ -33,6 +33,7 @@ def main():
     # Abort if more than half of the runs failed
     if (success_rate := 1 - n_failed / n_runs) < 0.5:
         logger.error("More than 50% of all runs failed! Aborting evaluation.")
+        print(f"::error title=Evaluation Failed::{n_failed} of {n_runs} runs failed (more than 50%)!")
         raise RuntimeError("Too many runs failed!")
 
     successful_times_avg = np.mean([x for x in ep_times if x is not None])

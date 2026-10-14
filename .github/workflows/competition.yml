@@ -50,13 +50,6 @@ jobs:
           
           # 3. Watch the run until it finishes. 
           # The --exit-status flag ensures that if the central evaluation fails, this student job fails too!
-          if ! gh run watch $RUN_ID \
+          gh run watch $RUN_ID \
             --repo learnsyslab/lsy_drone_racing \
-            --exit-status; then
-            # 4. On failure, print the logs of the failed step so the reason is visible here.
-            echo "❌ Central evaluation failed. Logs of the failed step:"
-            gh run view $RUN_ID \
-              --repo learnsyslab/lsy_drone_racing \
-              --log-failed
-            exit 1
-          fi
+            --exit-status
