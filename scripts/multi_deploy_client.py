@@ -57,6 +57,7 @@ def main(
         sensor_range=config_obj.env.kwargs[drone_rank]["sensor_range"],
         control_mode=config_obj.env.kwargs[drone_rank]["control_mode"],
     )
+    deregister = True
     try:
         obs, info = env.reset(options=config_obj.deploy)
 
@@ -104,9 +105,10 @@ def main(
             f"(finished={finished}, gates_passed={info['n_gates_passed']})"
         )
     except KeyboardInterrupt:
+        deregister = False
         logger.info(f"Client {drone_rank}: Interrupted by user")
     finally:
-        env.close()
+        env.unwrapped.close(deregister=deregister)
         rclpy.shutdown()
         logger.debug(f"Client {drone_rank}: Shutdown complete")
 

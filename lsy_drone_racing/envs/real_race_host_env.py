@@ -168,23 +168,17 @@ class CrazyflieWorker:
         while not self.stop_event.is_set() and not self.connection_lost:
             t_start = time.time()
 
+            if self.return_height_ready_event.is_set():
+                self._return_to_start()  # Check before action staleness to not confuse with crash
+                break
+
             with self.action_lock:
-                controller_stopped = bool(self.last_msg and self.last_msg.controller_stopped)
-                if (
-                    self.last_msg
-                    and not controller_stopped
-                    and (time.perf_counter() - self._last_msg_time) > 10 * dt
-                ):
+                if self.last_msg and (time.perf_counter() - self._last_msg_time) > 10 * dt:
                     self.logger.error(
                         f"No command received for 10 * {dt:.2f}s, handover control to host..."
                     )
                     break
                 action = list(self.last_msg.action) if self.last_msg else None
-
-            if controller_stopped:
-                self.logger.info("Received stop signal from client, waiting for return height...")
-                self._return_to_start()
-                break
 
             if action is not None:
                 action_array = (
@@ -433,30 +427,27 @@ class CrazyflieRealRaceHost:
         self._register_sub = node.create_subscription(
             Int32, "lsy_drone_racing/register", on_register, register_qos
         )
-        self._subs = []
-        for rank in range(self._num_drones):
 
-            def on_client_action(msg: RealClientAction, rank: int = rank):
-                if msg.controller_stopped and not self._clients_stopped[rank]:
-                    finish_order = len(self._finish_order)
-                    return_height = self._return_height_for_finish_order(finish_order)
-                    logger.info(
-                        f"Client {rank} stopped, assigning return height {return_height:.2f}m"
-                    )
-                    with self._assigned_return_heights.get_lock():
-                        self._assigned_return_heights[rank] = return_height
-                    self._return_height_ready_events[rank].set()
-                    self._finish_order.append(rank)
-                    self._clients_stopped[rank] = True
-
-            self._subs.append(
-                node.create_subscription(
-                    RealClientAction,
-                    f"lsy_drone_racing/client/drone_{rank}/action",
-                    on_client_action,
-                    10,
+        def on_deregister(msg: Int32):
+            if msg.data not in self._clients_registered:
+                logger.warning(f"Unknown drone ID {msg.data} tried to deregister")
+                return
+            rank = self._drone_ids.index(msg.data)  # the rank refers to the ordering in the config.
+            if not self._clients_stopped[rank]:
+                finish_order = len(self._finish_order)
+                return_height = self._return_height_for_finish_order(finish_order)
+                logger.info(
+                    f"Client cf{msg.data} stopped, assigning return height {return_height:.2f}m"
                 )
-            )
+                with self._assigned_return_heights.get_lock():
+                    self._assigned_return_heights[rank] = return_height
+                self._return_height_ready_events[rank].set()
+                self._finish_order.append(rank)
+                self._clients_stopped[rank] = True
+
+        self._deregister_sub = node.create_subscription(
+            Int32, "lsy_drone_racing/deregister", on_deregister, register_qos
+        )
 
         logger.debug("ROS2 communication initialized")
 
@@ -625,10 +616,10 @@ class CrazyflieRealRaceHost:
         """Run the host coordination loop.
 
         Waits until all clients have registered, then releases the drone workers via the init
-        barrier and publishes the race start. Afterwards waits until all clients report stopping.
+        barrier and publishes the race start. Afterwards waits until all drone workers have exited.
 
         Args:
-            race_update_freq: Frequency in Hz at which the host checks whether all clients stopped.
+            race_update_freq: Frequency in Hz at which the host checks whether the workers exited.
 
         Raises:
             RuntimeError: If a drone worker failed during initialization.
@@ -655,9 +646,6 @@ class CrazyflieRealRaceHost:
         logger.info("Race started")
         self._race_start_pub.publish(Empty())
 
-        while True:
-            all_stopped = all(self._clients_stopped.values())
-            if all_stopped:
-                logger.info("All clients stopped")
-                break
+        while any(p.is_alive() for p in self._processes):
             time.sleep(1.0 / race_update_freq)
+        logger.info("All drone workers finished")

@@ -205,7 +205,7 @@ class RealMultiDroneRaceEnvClient(Env):
             command = (*np.rad2deg(action[:3]), int(pwm))
             self._ros_connector.publish_cmd(command)
 
-        self._send_action_update(action, terminated)
+        self._send_action_update(action)
 
         return self.obs(), 0.0, terminated, False, self.info()
 
@@ -247,34 +247,32 @@ class RealMultiDroneRaceEnvClient(Env):
             "finished_track": n_gates_passed >= len(self.gate_sequence),
         }
 
-    def close(self):
-        """Send a final stop message and close all ROS connections."""
+    def close(self, deregister: bool = True):
+        """Deregister from the host and close all ROS connections.
+
+        Args:
+            deregister: Whether to deregister from the host, which makes the drone return to its
+                start position. If False, the drone worker detects the missing actions and
+                emergency stops the drone.
+        """
         logger.info("Closing environment...")
-        if self._client_action_pub:
-            if self.control_mode == "attitude":
-                stop_action = np.zeros(4)
-            else:
-                stop_action = np.zeros(16)
-                stop_action[9:13] = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion (x, y, z, w)
-            for _ in range(5):
-                self._send_action_update(stop_action, stopped=True)
-                time.sleep(0.05)
+        if deregister and self._comm:
+            self._deregister_pub.publish(Int32(data=self.drone_id))
+            time.sleep(0.2)  # Give the message time to go out before the node is destroyed
         if self._comm:
             self._comm.close()
         if self._ros_connector:
             self._ros_connector.close()
         logger.debug("Environment closed")
 
-    def _send_action_update(self, action: NDArray, stopped: bool):
-        """Publish a :class:`RealClientAction` to the host.
+    def _send_action_update(self, action: NDArray):
+        """Publish a :class:`RealClientAction` to the drone worker on the host.
 
         Args:
             action: Current control action.
-            stopped: Whether this client has finished or crashed.
         """
         msg = RealClientAction()
         msg.action = action.tolist() if isinstance(action, np.ndarray) else list(action)
-        msg.controller_stopped = stopped
         self._client_action_pub.publish(msg)
 
     def _init_ros_connectors(self):
@@ -306,6 +304,9 @@ class RealMultiDroneRaceEnvClient(Env):
         )
         self._client_action_pub = node.create_publisher(
             RealClientAction, f"lsy_drone_racing/client/drone_{self.rank}/action", 10
+        )
+        self._deregister_pub = node.create_publisher(
+            Int32, "lsy_drone_racing/deregister", latching_qos
         )
         logger.debug("ROS2 communication initialized")
 
