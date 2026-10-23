@@ -42,7 +42,13 @@ register(
 )
 
 register(
-    id="RealMultiDroneRacing-v0",
-    entry_point="lsy_drone_racing.envs.real_race_env:RealMultiDroneRaceEnv",
+    id="RealMultiDroneRaceEnvClient-v0",
+    entry_point="lsy_drone_racing.envs.real_race_client_env:RealMultiDroneRaceEnvClient",
+    disable_env_checker=True,
+)
+
+register(
+    id="RealMultiDroneRaceEnvhOST-v0",
+    entry_point="lsy_drone_racing.envs.real_race_host_env:RealMultiDroneRaceEnvHost",
     disable_env_checker=True,
 )
