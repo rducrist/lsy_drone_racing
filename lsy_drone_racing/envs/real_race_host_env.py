@@ -20,8 +20,6 @@ from crazyflow.control import load_params as load_control_params
 from crazyflow.dynamics import load_params as load_dynamics_params
 from drone_estimators.ros import ROSConnector
 from drone_racing_msgs.msg import RealClientAction, RealHostState
-from rclpy.qos import QoSProfile, ReliabilityPolicy
-from rosgraph_msgs.msg import Clock
 
 from lsy_drone_racing.envs.utils import load_track
 from lsy_drone_racing.utils.checks import check_drone_start_pos, check_race_track
@@ -122,14 +120,13 @@ class CrazyflieWorker:
         self._comm: RaceCommNode | None = None
         self._ros_connector: ROSConnector | None = None
         self._last_drone_pos_update: float = 0.0
+        self._last_msg_time: float = 0.0  # Local receive time of last_msg
 
     def _on_client_action(self, msg: RealClientAction):
         """Store the latest action received from the client."""
         with self.action_lock:
             self.last_msg = msg
-
-        latency_ms = (time.time() - msg.timestamp) * 1000
-        self.logger.debug(f"Action received (latency={latency_ms:.2f}ms)")
+            self._last_msg_time = time.perf_counter()
 
     def _init_cf(self):
         """Connect to the Crazyflie, reset it, and initialize its Kalman filter."""
@@ -174,7 +171,7 @@ class CrazyflieWorker:
                 if (
                     self.last_msg
                     and not controller_stopped
-                    and (t_start - self.last_msg.timestamp) > 10 * dt
+                    and (time.perf_counter() - self._last_msg_time) > 10 * dt
                 ):
                     self.logger.error(
                         f"No command received for 10 * {dt:.2f}s, handover control to host..."
@@ -334,8 +331,6 @@ class CrazyflieRealRaceHost:
     ROS2 messages to the client processes.
     """
 
-    CLOCK_FREQ = 500  # Hz at which the host clock is published on /clock
-
     gates: ConfigDict
     obstacles: ConfigDict
     drones_pose: ConfigDict
@@ -415,9 +410,6 @@ class CrazyflieRealRaceHost:
         self._host_state_pub = node.create_publisher(
             RealHostState, "lsy_drone_racing/host_state", 10
         )
-        clock_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self._clock_pub = node.create_publisher(Clock, "/clock", clock_qos)
-        self._clock_timer = node.create_timer(1 / self.CLOCK_FREQ, self._publish_clock)
         self._subs = []
         for rank in range(self._num_drones):
 
@@ -612,12 +604,6 @@ class CrazyflieRealRaceHost:
             return self._return_height_max
         alpha = finish_order / (self._num_drones - 1)
         return self._return_height_max + alpha * (self._return_height_min - self._return_height_max)
-
-    def _publish_clock(self):
-        """Publish the system time of the host on ``/clock``."""
-        msg = Clock()
-        msg.clock.sec, msg.clock.nanosec = divmod(time.time_ns(), 1_000_000_000)
-        self._clock_pub.publish(msg)
 
     def _publish_host_state(
         self,
