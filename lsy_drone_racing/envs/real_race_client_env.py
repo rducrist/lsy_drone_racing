@@ -20,8 +20,10 @@ from crazyflow.control import load_params as load_control_params
 from crazyflow.control.transform import force2pwm
 from crazyflow.dynamics import load_params as load_dynamics_params
 from drone_estimators.ros import ROSConnector
-from drone_racing_msgs.msg import RealClientAction, RealHostState  # type: ignore[import-untyped]
+from drone_racing_msgs.msg import RealClientAction  # type: ignore[import-untyped]
 from gymnasium import Env
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Empty, Int32
 
 from lsy_drone_racing.envs.real_race_env import EnvData
 from lsy_drone_racing.envs.utils import gate_passed, load_gate_order, load_track
@@ -85,6 +87,7 @@ class RealMultiDroneRaceEnvClient(Env):
         self.control_mode = control_mode
         self.drone_names = [f"cf{drone['id']}" for drone in drones]
         self.drone_name = self.drone_names[rank]
+        self.drone_id = drones[rank]["id"]
         drone_model = drones[rank]["drone"]
         self.drone_parameters: dict = load_dynamics_params(dynamics, drone_model)
         # PWM limits are firmware control parameters, separate from the dynamics parameters.
@@ -106,11 +109,7 @@ class RealMultiDroneRaceEnvClient(Env):
         self._comm: RaceCommNode | None = None
         self._client_action_pub: Any = None
 
-        self._host_ready_event = threading.Event()
-        self._race_started = False
-        self._race_start_time = 0.0
-        self._host_finished = False
-        self._client_ready = False
+        self._race_start_event = threading.Event()
 
     def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[dict, dict]:
         """Reset the environment and open the ROS connections.
@@ -142,48 +141,20 @@ class RealMultiDroneRaceEnvClient(Env):
         return self.obs(), self.info()
 
     def lock_until_race_start(self, timeout: float = 60.0):
-        """Sends dummy messages at the control frequency (``self.freq`` Hz) until the race starts.
-
-        After the host reports ready, the client waits for the race start.
+        """Register this drone with the host and block until the race starts.
 
         Args:
-            timeout: Maximum time in seconds to wait for host ready and race start.
+            timeout: Maximum time in seconds to wait for the race start.
 
         Raises:
-            TimeoutError: If host ready or race start exceeds ``timeout`` seconds.
+            TimeoutError: If the race does not start within ``timeout`` seconds.
         """
-        logger.info("Waiting for host ready message...")
-        stop_sending = threading.Event()
+        logger.info("Registering with host, waiting for race start...")
+        self._register_pub.publish(Int32(data=self.drone_id))
 
-        def send_action_messages():
-            while not stop_sending.is_set():
-                if self.control_mode == "attitude":
-                    dummy_action = np.zeros(4, dtype=np.float32)
-                else:
-                    dummy_action = np.zeros(16, dtype=np.float32)
-                    dummy_action[:3] = self._ros_connector.pos[self.drone_name]
-                    dummy_action[9:13] = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion (x, y, z, w)
-                self._send_action_update(dummy_action, stopped=False)
-                time.sleep(1 / self.freq)
+        if not self._race_start_event.wait(timeout):
+            raise TimeoutError(f"Timeout waiting for race start after {timeout}s.")
 
-        threading.Thread(target=send_action_messages, daemon=True).start()
-
-        if not self._host_ready_event.wait(timeout=timeout):
-            stop_sending.set()
-            raise TimeoutError(
-                "Timeout waiting for host ready. "
-                "Host may not be running or network connection failed."
-            )
-
-        logger.info("Received host ready message.")
-        logger.info("Waiting for race start")
-
-        t_start = time.time()
-        while not self._race_started:
-            if time.time() - t_start > timeout:
-                raise TimeoutError(f"Timeout waiting for race start after {timeout}s.")
-            time.sleep(0.001)
-        stop_sending.set()
         logger.info("Race starts!")
 
     def step(self, action: NDArray) -> tuple[dict, float, bool, bool, dict]:
@@ -294,10 +265,6 @@ class RealMultiDroneRaceEnvClient(Env):
             self._ros_connector.close()
         logger.debug("Environment closed")
 
-    def set_client_ready(self):
-        """Mark the client as fully initialized and ready for race start."""
-        self._client_ready = True
-
     def _send_action_update(self, action: NDArray, stopped: bool):
         """Publish a :class:`RealClientAction` to the host.
 
@@ -305,13 +272,8 @@ class RealMultiDroneRaceEnvClient(Env):
             action: Current control action.
             stopped: Whether this client has finished or crashed.
         """
-        elapsed_time = time.time() - self._race_start_time if self._race_started else 0.0
         msg = RealClientAction()
-        msg.drone_rank = self.rank
         msg.action = action.tolist() if isinstance(action, np.ndarray) else list(action)
-        msg.elapsed_time = elapsed_time
-        msg.timestamp = time.time()
-        msg.client_ready = self._client_ready
         msg.controller_stopped = stopped
         self._client_action_pub.publish(msg)
 
@@ -328,19 +290,19 @@ class RealMultiDroneRaceEnvClient(Env):
         self._comm = RaceCommNode(f"lsy_race_client_{self.rank}")
         node = self._comm.node
 
-        def on_host_state(msg: RealHostState):
-            latency_ms = (time.time() - msg.timestamp) * 1000
-            if msg.host_ready and not self._host_ready_event.is_set():
-                self._host_ready_event.set()
-                logger.debug(f"Host ready (latency: {latency_ms:.2f}ms)")
-            if msg.race_started and not self._race_started:
-                self._race_started = True
-                self._race_start_time = time.time() - msg.elapsed_time
-                logger.debug(f"Race started (latency: {latency_ms:.2f}ms)")
-            self._host_finished = bool(msg.race_finished)
+        # TODO make this more generic. This code duplicates in race host
+        latching_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._register_pub = node.create_publisher(Int32, "lsy_drone_racing/register", latching_qos)
 
-        self._sub = node.create_subscription(
-            RealHostState, "lsy_drone_racing/host_state", on_host_state, 10
+        def race_started(msg: Empty):
+            self._race_start_event.set()
+
+        self._race_start_sub = node.create_subscription(
+            Empty, "lsy_drone_racing/race_start", race_started, latching_qos
         )
         self._client_action_pub = node.create_publisher(
             RealClientAction, f"lsy_drone_racing/client/drone_{self.rank}/action", 10

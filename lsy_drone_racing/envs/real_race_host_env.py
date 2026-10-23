@@ -19,7 +19,9 @@ import rclpy
 from crazyflow.control import load_params as load_control_params
 from crazyflow.dynamics import load_params as load_dynamics_params
 from drone_estimators.ros import ROSConnector
-from drone_racing_msgs.msg import RealClientAction, RealHostState
+from drone_racing_msgs.msg import RealClientAction
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Empty, Int32
 
 from lsy_drone_racing.envs.utils import load_track
 from lsy_drone_racing.utils.checks import check_drone_start_pos, check_race_track
@@ -390,33 +392,51 @@ class CrazyflieRealRaceHost:
         self._stop_event = None
         self._init_barrier = None
         self._shutdown_event = threading.Event()
-        self._clients_ready: dict[int, bool] = {rank: False for rank in range(self._num_drones)}
+        self._clients_registered: dict[int, bool] = dict.fromkeys(self._drone_ids, False)
         self._clients_stopped: dict[int, bool] = {rank: False for rank in range(self._num_drones)}
         self._finish_order: list[int] = []
         self._return_height_min = float(deploy_args.return_height_min)
         self._return_height_max = float(deploy_args.return_height_max)
         if self._return_height_min > self._return_height_max:
             raise ValueError("return_height_min must be less than or equal to return_height_max")
-        self._start_time = time.time()
-        self._race_started = False
         self._comm = None
-        self._host_state_pub = None
+        self._race_start_pub = None
         self.init_comm()
 
     def init_comm(self):
         """Set up the ROS2 communication node with all publishers and subscribers."""
         self._comm = RaceCommNode("lsy_race_host")
         node = self._comm.node
-        self._host_state_pub = node.create_publisher(
-            RealHostState, "lsy_drone_racing/host_state", 10
+        # Late joiners still receive the last message on these topics
+        register_qos = QoSProfile(
+            depth=self._num_drones,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        race_start_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._race_start_pub = node.create_publisher(
+            Empty, "lsy_drone_racing/race_start", race_start_qos
+        )
+
+        def on_register(msg: Int32):
+            if msg.data not in self._clients_registered:
+                logger.warning(f"Unknown drone ID {msg.data} tried to register")
+            elif not self._clients_registered[msg.data]:
+                logger.info(f"Client cf{msg.data} registered")
+                self._clients_registered[msg.data] = True
+
+        self._register_sub = node.create_subscription(
+            Int32, "lsy_drone_racing/register", on_register, register_qos
         )
         self._subs = []
         for rank in range(self._num_drones):
 
             def on_client_action(msg: RealClientAction, rank: int = rank):
-                if msg.client_ready and not self._clients_ready[rank]:
-                    logger.debug(f"Client {rank} ready")
-                    self._clients_ready[rank] = True
                 if msg.controller_stopped and not self._clients_stopped[rank]:
                     finish_order = len(self._finish_order)
                     return_height = self._return_height_for_finish_order(finish_order)
@@ -564,10 +584,6 @@ class CrazyflieRealRaceHost:
 
     def close(self):
         """Stop all drone subprocesses and close ROS communication."""
-        if self._host_state_pub:
-            self._publish_host_state(
-                host_ready=True, race_started=self._race_started, race_finished=True
-            )
         if self._init_barrier is not None:
             self._init_barrier.abort()
         if all(self._clients_stopped.values()):
@@ -605,52 +621,31 @@ class CrazyflieRealRaceHost:
         alpha = finish_order / (self._num_drones - 1)
         return self._return_height_max + alpha * (self._return_height_min - self._return_height_max)
 
-    def _publish_host_state(
-        self,
-        *,
-        host_ready: bool,
-        race_started: bool,
-        race_finished: bool,
-        elapsed_time: float = 0.0,
-    ) -> None:
-        """Publish the current host lifecycle state."""
-        self._host_state_pub.publish(
-            RealHostState(
-                elapsed_time=elapsed_time,
-                timestamp=time.time(),
-                host_ready=host_ready,
-                race_started=race_started,
-                race_finished=race_finished,
-            )
-        )
-
     def host_main_loop(self, race_update_freq: float = 50.0):
         """Run the host coordination loop.
 
-        Broadcasts :class:`RealHostState` until all clients signal readiness, then releases the
-        drone workers via the init barrier. Enters the race loop broadcasting host state until all
-        clients report stopping.
+        Waits until all clients have registered, then releases the drone workers via the init
+        barrier and publishes the race start. Afterwards waits until all clients report stopping.
 
         Args:
-            race_update_freq: Frequency in Hz at which host state is broadcast.
+            race_update_freq: Frequency in Hz at which the host checks whether all clients stopped.
 
         Raises:
             RuntimeError: If a drone worker failed during initialization.
-            TimeoutError: If clients do not become ready within 300 seconds.
+            TimeoutError: If clients do not register within 300 seconds.
         """
         if self._init_barrier.broken:
             raise RuntimeError("A drone worker failed during initialization")
-        logger.info("Drones connected, waiting for clients...")
+        logger.info("Drones connected, waiting for clients to register...")
         t_start = time.time()
         while time.time() - t_start < 300.0:
-            self._publish_host_state(host_ready=True, race_started=False, race_finished=False)
-            if all(self._clients_ready.values()):
-                logger.info("All clients ready")
+            if all(self._clients_registered.values()):
+                logger.info("All clients registered")
                 break
             time.sleep(0.1)
 
-        if not all(self._clients_ready.values()):
-            raise TimeoutError("Timeout waiting for all clients to become ready")
+        if not all(self._clients_registered.values()):
+            raise TimeoutError("Timeout waiting for all clients to register")
 
         try:
             self._init_barrier.wait(timeout=None)
@@ -658,18 +653,10 @@ class CrazyflieRealRaceHost:
             raise RuntimeError("A drone worker failed during initialization") from error
 
         logger.info("Race started")
-        self._race_started = True
-        self._start_time = time.time()
+        self._race_start_pub.publish(Empty())
 
         while True:
-            elapsed_time = time.time() - self._start_time
             all_stopped = all(self._clients_stopped.values())
-            self._publish_host_state(
-                host_ready=True,
-                race_started=True,
-                race_finished=all_stopped,
-                elapsed_time=elapsed_time,
-            )
             if all_stopped:
                 logger.info("All clients stopped")
                 break
