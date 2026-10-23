@@ -143,7 +143,7 @@ class CrazyflieWorker:
         self._comm = RaceCommNode(f"lsy_race_worker_{self.rank}")
         self._sub = self._comm.node.create_subscription(
             RealClientAction,
-            f"lsy_drone_racing/client/drone_{self.rank}/action",
+            f"lsy_drone_racing/{self.drone_name}/action",
             self._on_client_action,
             10,
         )

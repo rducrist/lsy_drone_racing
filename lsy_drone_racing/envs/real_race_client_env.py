@@ -303,7 +303,7 @@ class RealMultiDroneRaceEnvClient(Env):
             Empty, "lsy_drone_racing/race_start", race_started, latching_qos
         )
         self._client_action_pub = node.create_publisher(
-            RealClientAction, f"lsy_drone_racing/client/drone_{self.rank}/action", 10
+            RealClientAction, f"lsy_drone_racing/{self.drone_name}/action", 10
         )
         self._deregister_pub = node.create_publisher(
             Int32, "lsy_drone_racing/deregister", latching_qos
