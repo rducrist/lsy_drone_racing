@@ -21,13 +21,12 @@ from crazyflow.control.transform import force2pwm
 from crazyflow.dynamics import load_params as load_dynamics_params
 from drone_estimators.ros import ROSConnector
 from drone_racing_msgs.msg import RealClientAction, RealHostState  # type: ignore[import-untyped]
-from drone_racing_msgs.srv import RealCalibrateClock  # type: ignore[import-untyped]
 from gymnasium import Env
 
 from lsy_drone_racing.envs.real_race_env import EnvData
 from lsy_drone_racing.envs.utils import gate_passed, load_gate_order, load_track
 from lsy_drone_racing.utils.ros import track_poses
-from lsy_drone_racing.utils.ros_race_comm import RaceCommNode, calibrate_clock
+from lsy_drone_racing.utils.ros_race_comm import RaceCommNode
 
 if TYPE_CHECKING:
     from crazyflow.dynamics import Dynamics
@@ -106,12 +105,10 @@ class RealMultiDroneRaceEnvClient(Env):
 
         self._comm: RaceCommNode | None = None
         self._client_action_pub: Any = None
-        self._clock_calib_client: Any = None
 
         self._host_ready_event = threading.Event()
         self._race_started = False
         self._race_start_time = 0.0
-        self._clock_offset = 0.0
         self._host_finished = False
         self._client_ready = False
 
@@ -147,14 +144,13 @@ class RealMultiDroneRaceEnvClient(Env):
     def lock_until_race_start(self, timeout: float = 60.0):
         """Sends dummy messages at the control frequency (``self.freq`` Hz) until the race starts.
 
-        After the host reports ready, the client calibrates its clock offset and waits for the
-        race start.
+        After the host reports ready, the client waits for the race start.
 
         Args:
-            timeout: Maximum time in seconds to wait for calibration and race start.
+            timeout: Maximum time in seconds to wait for host ready and race start.
 
         Raises:
-            TimeoutError: If calibration or race start exceeds ``timeout`` seconds.
+            TimeoutError: If host ready or race start exceeds ``timeout`` seconds.
         """
         logger.info("Waiting for host ready message...")
         stop_sending = threading.Event()
@@ -180,8 +176,6 @@ class RealMultiDroneRaceEnvClient(Env):
             )
 
         logger.info("Received host ready message.")
-        self._clock_offset = calibrate_clock(self._clock_calib_client, n=5, timeout=timeout)
-        logger.info(f"Clock offset = {self._clock_offset * 1000:.2f}ms")
         logger.info("Waiting for race start")
 
         t_start = time.time()
@@ -307,9 +301,6 @@ class RealMultiDroneRaceEnvClient(Env):
     def _send_action_update(self, action: NDArray, stopped: bool):
         """Publish a :class:`RealClientAction` to the host.
 
-        The timestamp is adjusted by the calibrated clock offset so the host can
-        measure accurate latency without clock skew.
-
         Args:
             action: Current control action.
             stopped: Whether this client has finished or crashed.
@@ -319,7 +310,7 @@ class RealMultiDroneRaceEnvClient(Env):
         msg.drone_rank = self.rank
         msg.action = action.tolist() if isinstance(action, np.ndarray) else list(action)
         msg.elapsed_time = elapsed_time
-        msg.timestamp = time.time() + self._clock_offset
+        msg.timestamp = time.time()
         msg.client_ready = self._client_ready
         msg.controller_stopped = stopped
         self._client_action_pub.publish(msg)
@@ -353,9 +344,6 @@ class RealMultiDroneRaceEnvClient(Env):
         )
         self._client_action_pub = node.create_publisher(
             RealClientAction, f"lsy_drone_racing/client/drone_{self.rank}/action", 10
-        )
-        self._clock_calib_client = node.create_client(
-            RealCalibrateClock, "lsy_drone_racing/calibrate_clock"
         )
         logger.debug("ROS2 communication initialized")
 
