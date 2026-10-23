@@ -322,13 +322,13 @@ class RealMultiDroneRaceEnvClient(Env):
         ang_vel = np.full((self.n_drones, 3), np.nan, dtype=np.float32)
         for i, name in enumerate(self.drone_names):
             if i == self.rank:
-                pos[i] = self._ros_connector.pos[name]
-                quat[i] = self._ros_connector.quat[name]
-                vel[i] = self._ros_connector.vel[name]
-                ang_vel[i] = self._ros_connector.ang_vel[name]
+                pos[i] = self._ros_connector.est_pos[name]
+                quat[i] = self._ros_connector.est_quat[name]
+                vel[i] = self._ros_connector.est_vel[name]
+                ang_vel[i] = self._ros_connector.est_ang_vel[name]
             else:
-                pos[i] = self._ros_connector.pos.get(name, np.nan)
-                quat[i] = self._ros_connector.quat.get(name, np.nan)
-                vel[i] = self._ros_connector.vel.get(name, np.nan)
-                ang_vel[i] = self._ros_connector.ang_vel.get(name, np.nan)
+                pos[i] = self._ros_connector.est_pos.get(name, np.nan)
+                quat[i] = self._ros_connector.est_quat.get(name, np.nan)
+                vel[i] = self._ros_connector.est_vel.get(name, np.nan)
+                ang_vel[i] = self._ros_connector.est_ang_vel.get(name, np.nan)
         return pos, quat, vel, ang_vel
