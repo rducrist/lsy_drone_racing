@@ -219,14 +219,14 @@ class CrazyflieWorker:
 
     def _return_to_start(self):
         """Return the drone to its configured start position if it has taken off."""
-        pos = self._ros_connector.pos[self.drone_name]
+        pos = self._ros_connector.est_pos[self.drone_name]
         if pos[2] <= 0.1:
             return
         obs = {
             "pos": pos,
-            "quat": self._ros_connector.quat[self.drone_name],
-            "vel": self._ros_connector.vel[self.drone_name],
-            "ang_vel": self._ros_connector.ang_vel[self.drone_name],
+            "quat": self._ros_connector.est_quat[self.drone_name],
+            "vel": self._ros_connector.est_vel[self.drone_name],
+            "ang_vel": self._ros_connector.est_ang_vel[self.drone_name],
         }
         self.return_to_start_event.set()
         try:
@@ -554,10 +554,10 @@ class CrazyflieRealRaceHost:
                 tf_names += [f"obstacle{i}" for i in range(1, self.n_obstacles + 1)]
                 ros_connector = ROSConnector(tf_names=tf_names, timeout=5.0)
                 for i in range(self.n_gates):
-                    self.gates.pos[i] = ros_connector.pos[f"gate{i + 1}"]
-                    self.gates.quat[i] = ros_connector.quat[f"gate{i + 1}"]
+                    self.gates.pos[i] = ros_connector.tf_pos[f"gate{i + 1}"]
+                    self.gates.quat[i] = ros_connector.tf_quat[f"gate{i + 1}"]
                 for i in range(self.n_obstacles):
-                    self.obstacles.pos[i] = ros_connector.pos[f"obstacle{i + 1}"]
+                    self.obstacles.pos[i] = ros_connector.tf_pos[f"obstacle{i + 1}"]
             finally:
                 if ros_connector:
                     ros_connector.close()
@@ -567,8 +567,8 @@ class CrazyflieRealRaceHost:
             try:
                 ros_connector = ROSConnector(tf_names=self._drone_names, timeout=5.0)
                 for rank, drone_name in enumerate(self._drone_names):
-                    self.drones_pose.pos[rank] = ros_connector.pos[drone_name]
-                    self.drones_pose.quat[rank] = ros_connector.quat[drone_name]
+                    self.drones_pose.pos[rank] = ros_connector.tf_pos[drone_name]
+                    self.drones_pose.quat[rank] = ros_connector.tf_quat[drone_name]
             finally:
                 if ros_connector:
                     ros_connector.close()
