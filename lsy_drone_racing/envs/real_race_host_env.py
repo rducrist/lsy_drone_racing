@@ -65,6 +65,7 @@ class CrazyflieWorker:
         init_barrier: mp.synchronize.Barrier,
         control_mode: Literal["attitude", "state"],
         control_freq: float = 50.0,
+        deploy_in_sim: bool = False
     ):
         """Initialize the Crazyflie worker.
 
@@ -85,6 +86,7 @@ class CrazyflieWorker:
                 calls :meth:`abort` to propagate the failure to everyone.
             control_mode: Either ``"attitude"`` or ``"state"``.
             control_freq: Frequency in Hz at which actions are forwarded to the drone.
+            deploy_in_sim: Use the crazyflow-itl interface for deployment.
         """
         self.rank = rank
         self.radio_id = radio_id
@@ -101,6 +103,8 @@ class CrazyflieWorker:
             False  # Set to True if connection fails during the initial connection phase
         )
         self.connection_lost = False  # Set to True if connection is lost after being established
+        
+        self.deploy_in_sim = deploy_in_sim
 
         assert control_mode in ["attitude", "state"], "control_mode must be 'attitude' or 'state'"
         self._control_mode: Literal["attitude", "state"] = control_mode
@@ -133,7 +137,10 @@ class CrazyflieWorker:
     def _init_cf(self):
         """Connect to the Crazyflie, reset it, and initialize its Kalman filter."""
         self.logger.info(f"Connecting to Crazyflie with ID {self.drone_id}...")
-        self.drone = Crazyflie.from_radio(self.radio_id, self.drone_channel, self.drone_id)
+        if self.deploy_in_sim:
+            self.drone = Crazyflie(f"udp://127.0.0.1:{19850 + self.rank}", self.drone_name)
+        else: 
+            self.drone = Crazyflie.from_radio(self.radio_id, self.drone_channel, self.drone_id)
         self.drone.connect()
         self.drone.reset(arm=True)
         self.logger.info("Connected to Crazyflie")
@@ -278,6 +285,7 @@ class CrazyflieWorker:
 
     @staticmethod
     def crazyflie_process_worker(
+        deploy_in_sim: bool, 
         rank: int,
         radio_id: int,
         drone_id: int,
@@ -299,6 +307,7 @@ class CrazyflieWorker:
         """
         signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ignore SIGINT in worker processes
         CrazyflieWorker(
+            deploy_in_sim=deploy_in_sim,
             rank=rank,
             radio_id=radio_id,
             drone_id=drone_id,
@@ -372,8 +381,9 @@ class CrazyflieRealRaceHost:
         self._drone_names = [f"cf{drone['id']}" for drone in deploy_args.drones]
         self._drone_ids = [drone["id"] for drone in deploy_args.drones]
         self._drone_channels = [drone["channel"] for drone in deploy_args.drones]
-        self._radio_ids = [drone["radio"] for drone in deploy_args.drones]
+        self._radio_ids = [drone.get("radio") for drone in deploy_args.drones]
         self._drone_models = [drone["drone"] for drone in deploy_args.drones]
+        self._deploy_in_sim = bool(deploy_args.get("deploy_in_sim", False))
         self._dynamics = dynamics
         self._drone_control_freq = [kwargs["freq"] for kwargs in control_args]
         self._drone_control_mode = [kwargs["control_mode"] for kwargs in control_args]
@@ -514,6 +524,7 @@ class CrazyflieRealRaceHost:
             process = self._mp_ctx.Process(
                 target=CrazyflieWorker.crazyflie_process_worker,
                 args=(
+                    self._deploy_in_sim, 
                     rank,
                     self._radio_ids[rank],
                     self._drone_ids[rank],
@@ -629,7 +640,7 @@ class CrazyflieRealRaceHost:
         n_track = len(self.gate_sequence)
         idx = np.minimum(self._n_gates_passed, n_track - 1)  # Finished drones index the last gate
         gate_ids = self.gate_sequence[idx]
-        passed = np.asarray(
+        passed = np.array(
             gate_passed(
                 pos,
                 last_pos,
