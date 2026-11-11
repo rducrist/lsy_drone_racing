@@ -23,7 +23,7 @@ from drone_racing_msgs.msg import RealClientAction
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Empty, Int32
 
-from lsy_drone_racing.envs.utils import load_track
+from lsy_drone_racing.envs.utils import gate_passed, load_gate_order, load_track
 from lsy_drone_racing.utils.checks import check_drone_start_pos, check_race_track
 from lsy_drone_racing.utils.crazyflie import Crazyflie
 from lsy_drone_racing.utils.ros_race_comm import RaceCommNode
@@ -388,6 +388,14 @@ class CrazyflieRealRaceHost:
         self._shutdown_event = threading.Event()
         self._clients_registered: dict[int, bool] = dict.fromkeys(self._drone_ids, False)
         self._clients_stopped: dict[int, bool] = {rank: False for rank in range(self._num_drones)}
+
+        # For tracking the finish line
+        self.gate_sequence, self.gate_sequence_direction = load_gate_order(track, self.n_gates)
+        self._n_gates_passed = np.zeros(self._num_drones, dtype=np.int32)
+        self._finish_times = np.full(self._num_drones, np.nan)
+        self._ros_connector: ROSConnector | None = None
+
+        # For returning home
         self._finish_order: list[int] = []
         self._return_height_min = float(deploy_args.return_height_min)
         self._return_height_max = float(deploy_args.return_height_max)
@@ -601,6 +609,9 @@ class CrazyflieRealRaceHost:
                         process.kill()
                         process.join()
 
+        if self._ros_connector:
+            self._ros_connector.close()
+
         if self._comm:
             self._comm.close()
         logger.info("Host shutdown complete")
@@ -612,14 +623,55 @@ class CrazyflieRealRaceHost:
         alpha = finish_order / (self._num_drones - 1)
         return self._return_height_max + alpha * (self._return_height_min - self._return_height_max)
 
+    def _update_gates_passed(self, last_pos: NDArray, t_race: float) -> NDArray:
+        """Count gate passes of unfinished drones and return the current positions."""
+        pos = np.stack([self._ros_connector.est_pos[name] for name in self._drone_names])
+        n_track = len(self.gate_sequence)
+        idx = np.minimum(self._n_gates_passed, n_track - 1)  # Finished drones index the last gate
+        gate_ids = self.gate_sequence[idx]
+        passed = np.asarray(
+            gate_passed(
+                pos,
+                last_pos,
+                self.gates.pos[gate_ids],
+                self.gates.quat[gate_ids],
+                self.gate_sequence_direction[idx] < 0,
+                (0.45, 0.45),
+            )
+        )
+        passed &= self._n_gates_passed < n_track  # Finished drones stop counting
+        self._n_gates_passed += passed
+        self._finish_times[passed & (self._n_gates_passed == n_track)] = t_race
+        return pos
+
+    def _print_leaderboard(self):
+        """Log finished drones by time, then unfinished drones by gates passed."""
+        n_track = len(self.gate_sequence)
+        finished = self._n_gates_passed == n_track
+        ranking = sorted(
+            range(self._num_drones),
+            key=lambda r: (
+                not finished[r],
+                self._finish_times[r] if finished[r] else -self._n_gates_passed[r],
+            ),
+        )
+        lines = ["Leaderboard:"]
+        for place, r in enumerate(ranking, 1):
+            time_str = f"{self._finish_times[r]:.3f}s" if finished[r] else "DNF"
+            gates = f"{self._n_gates_passed[r]}/{n_track}"
+            lines.append(f"  {place}. {self._drone_names[r]}  {time_str}  gates {gates}")
+        logger.info("\n".join(lines))
+
     def host_main_loop(self, race_update_freq: float = 50.0):
         """Run the host coordination loop.
 
         Waits until all clients have registered, then releases the drone workers via the init
-        barrier and publishes the race start. Afterwards waits until all drone workers have exited.
+        barrier and publishes the race start. Afterwards tracks the gates passed by each drone until
+        all drone workers have exited, then logs the leaderboard.
 
         Args:
-            race_update_freq: Frequency in Hz at which the host checks whether the workers exited.
+            race_update_freq: Frequency in Hz at which the host tracks gate passes and checks
+                whether the workers exited.
 
         Raises:
             RuntimeError: If a drone worker failed during initialization.
@@ -627,6 +679,11 @@ class CrazyflieRealRaceHost:
         """
         if self._init_barrier.broken:
             raise RuntimeError("A drone worker failed during initialization")
+        self._ros_connector = ROSConnector(estimator_names=self._drone_names, timeout=10.0)
+        # Drones are on the ground, so this only JIT-compiles gate_passed and sets last_pos
+        last_pos = self._update_gates_passed(
+            np.stack([self._ros_connector.est_pos[n] for n in self._drone_names]), 0.0
+        )
         logger.info("Drones connected, waiting for clients to register...")
         t_start = time.time()
         while time.time() - t_start < 300.0:
@@ -645,7 +702,10 @@ class CrazyflieRealRaceHost:
 
         logger.info("Race started")
         self._race_start_pub.publish(Empty())
+        t_start = time.perf_counter()
 
         while any(p.is_alive() for p in self._processes):
+            last_pos = self._update_gates_passed(last_pos, time.perf_counter() - t_start)
             time.sleep(1.0 / race_update_freq)
         logger.info("All drone workers finished")
+        self._print_leaderboard()
