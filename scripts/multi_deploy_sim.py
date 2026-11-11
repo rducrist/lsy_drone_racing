@@ -14,14 +14,19 @@ from pathlib import Path
 
 import fire
 import jax.numpy as jnp
+import mujoco
 import rclpy
 from crazyflow.sim import Sim
 from crazyflow_itl import RealTimePlugin, RenderPlugin, run
 from crazyflow_itl.crazyflie import CrazyfliePlugin
 from crazyflow_itl.ros import TFPlugin
+from ml_collections.config_dict import ConfigDict
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.utils import load_config
+
+ASSETS = Path(__file__).parents[1] / "lsy_drone_racing/envs/assets"
+
 
 
 def main(config: str = "multi_level2.toml", render: bool = False):
@@ -40,6 +45,7 @@ def main(config: str = "multi_level2.toml", render: bool = False):
         dynamics="first_principles",
         freq=cfg.sim.freq,
     )
+    load_track_into_sim(sim, cfg.env.track)
     pos = jnp.asarray([[d["pos"] for d in drones]], dtype=jnp.float32, device=sim.device)
     quat = jnp.asarray(
         [R.from_euler("xyz", [d["rpy"] for d in drones]).as_quat()],
@@ -59,6 +65,22 @@ def main(config: str = "multi_level2.toml", render: bool = False):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+def load_track_into_sim(sim: Sim, track: ConfigDict):
+    """Add the gates and obstacles of the track to the sim as static mocap bodies."""
+    gate_spec = mujoco.MjSpec.from_file(str(ASSETS / "gate.xml"))
+    obstacle_spec = mujoco.MjSpec.from_file(str(ASSETS / "obstacle.xml"))
+    frame = sim.spec.worldbody.add_frame()
+    for i, gate in enumerate(track.gates):
+        body = frame.attach_body(gate_spec.body("gate"), "", f":{i}")
+        body.pos = gate["pos"]
+        body.quat = R.from_euler("xyz", gate["rpy"]).as_quat(scalar_first=True)  # MuJoCo order
+        body.mocap = True
+    for i, obstacle in enumerate(track.obstacles):
+        body = frame.attach_body(obstacle_spec.body("obstacle"), "", f":{i}")
+        body.pos = obstacle["pos"]
+        body.mocap = True
+    sim.build_mjx()
 
 
 if __name__ == "__main__":
