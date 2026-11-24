@@ -60,6 +60,7 @@ class CrazyflieWorker:
         init_barrier: mp.synchronize.Barrier,
         control_mode: Literal["attitude", "state"],
         control_freq: float = 50.0,
+        deploy_in_sim: bool = False,
     ):
         """Initialize the Crazyflie worker.
 
@@ -78,6 +79,7 @@ class CrazyflieWorker:
                 calls :meth:`abort` to propagate the failure to everyone.
             control_mode: Either ``"attitude"`` or ``"state"``.
             control_freq: Frequency in Hz at which actions are forwarded to the drone.
+            deploy_in_sim: Use the crazyflow-itl interface for deployment.
         """
         self.rank = rank
         self.drone_cfg = drone
@@ -88,6 +90,7 @@ class CrazyflieWorker:
         self.assigned_return_heights = assigned_return_heights
         self.stop_event = stop_event
         self.init_barrier = init_barrier
+        self.deploy_in_sim = deploy_in_sim
 
         assert control_mode in ["attitude", "state"], "control_mode must be 'attitude' or 'state'"
         self._control_mode: Literal["attitude", "state"] = control_mode
@@ -115,8 +118,11 @@ class CrazyflieWorker:
     def _init_cf(self):
         """Connect to the Crazyflie, reset it, and initialize its Kalman filter."""
         self.logger.info(f"Connecting to Crazyflie with ID {self.drone_id}...")
-        cfg = self.drone_cfg
-        self.drone = Crazyflie.from_radio(cfg.get("radio"), cfg["channel"], self.drone_id)
+        if self.deploy_in_sim:
+            self.drone = Crazyflie(f"udp://127.0.0.1:{19850 + self.rank}", self.drone_name)
+        else:
+            cfg = self.drone_cfg
+            self.drone = Crazyflie.from_radio(cfg.get("radio"), cfg["channel"], self.drone_id)
         self.drone.connect()
         self.drone.reset(arm=True)
         self.logger.info("Connected to Crazyflie")
@@ -321,6 +327,7 @@ class CrazyflieRealRaceHost:
         self._drone_names = [f"cf{drone['id']}" for drone in self._drones]
         self._rank_of_id = {drone["id"]: rank for rank, drone in enumerate(self._drones)}
         self._control_args = control_args
+        self._deploy_in_sim = bool(deploy_args.get("deploy_in_sim", False))
         self._dynamics = dynamics
         self._num_drones = len(self._drones)
 
@@ -467,6 +474,7 @@ class CrazyflieRealRaceHost:
                     init_barrier=self._init_barrier,
                     control_mode=self._control_args[rank]["control_mode"],
                     control_freq=self._control_args[rank]["freq"],
+                    deploy_in_sim=self._deploy_in_sim,
                 ),
                 name=f"CrazyflieProcess-{rank}",
             )

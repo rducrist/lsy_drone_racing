@@ -16,6 +16,8 @@ check_race_track = true
 check_drone_start_pos = true
 # Lets you practice your controller without putting up gates & obstacles, assumes nominal positions given below.
 real_track_objects = true
+# Connect to drones simulated by scripts/deploy_in_sim.py instead of the real ones.
+deploy_in_sim = false
 
 # Specify the minimal and maximal height for the return controller
 return_height_min = 1.75

@@ -79,6 +79,7 @@ class RealRaceCoreEnv:
         dynamics: Dynamics,
         sensor_range: float = 0.5,
         control_mode: Literal["state", "attitude"] = "state",
+        deploy_in_sim: bool = False,
     ):
         """Create a deployable version of the drone racing environment.
 
@@ -92,6 +93,7 @@ class RealRaceCoreEnv:
             sensor_range: Sensor range. Determines at which distance the exact position of the
                 gates and obstacles is reveiled.
             control_mode: Control mode of the drone.
+            deploy_in_sim: Connect to a crazyflow_itl simulated drone over UDP instead of the radio.
         """
         assert rclpy.ok(), "ROS2 is not running. Please start ROS2 before creating a deploy env."
         # Static env data
@@ -114,12 +116,15 @@ class RealRaceCoreEnv:
         self.randomizations = randomizations
         drone_config = drones[rank]
         self.drone_parameters = load_drone_params(dynamics, drone_config["drone"])
-        self.drone = Crazyflie.from_radio(
-            radio_id=self.rank,
-            radio_channel=drone_config["channel"],
-            drone_id=drone_config["id"],
-            drone_name=self.drone_name,
-        )
+        if deploy_in_sim:  # Simulated drone served by scripts/deploy_in_sim.py
+            self.drone = Crazyflie(f"udp://127.0.0.1:{19850 + rank}", self.drone_name)
+        else:
+            self.drone = Crazyflie.from_radio(
+                radio_id=self.rank,
+                radio_channel=drone_config["channel"],
+                drone_id=drone_config["id"],
+                drone_name=self.drone_name,
+            )
         self._ros_connector = ROSConnector(estimator_names=self.drone_names, timeout=10.0)
         # Dynamic data
         self.data = EnvData.create(
@@ -394,6 +399,7 @@ class RealDroneRaceEnv(RealRaceCoreEnv, Env):
         dynamics: Dynamics,
         sensor_range: float = 0.5,
         control_mode: Literal["state", "attitude"] = "state",
+        deploy_in_sim: bool = False,
     ):
         """Initialize the multi-drone environment.
 
@@ -420,6 +426,7 @@ class RealDroneRaceEnv(RealRaceCoreEnv, Env):
             sensor_range: Sensor range. Determines at which distance the exact position of the
                 gates and obstacles is reveiled.
             control_mode: Control mode of the drone.
+            deploy_in_sim: Connect to a crazyflow_itl simulated drone over UDP instead of the radio.
         """
         super().__init__(
             drones=drones,
@@ -430,6 +437,7 @@ class RealDroneRaceEnv(RealRaceCoreEnv, Env):
             dynamics=dynamics,
             sensor_range=sensor_range,
             control_mode=control_mode,
+            deploy_in_sim=deploy_in_sim,
         )
 
     def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple[dict, dict]:
