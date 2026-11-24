@@ -53,7 +53,6 @@ def main(
         freq=config_obj.env.kwargs[drone_rank]["freq"],
         track=config_obj.env.track,
         randomizations=config_obj.env.randomizations,
-        dynamics=config_obj.sim.dynamics,
         sensor_range=config_obj.env.kwargs[drone_rank]["sensor_range"],
         control_mode=config_obj.env.kwargs[drone_rank]["control_mode"],
     )

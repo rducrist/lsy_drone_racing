@@ -16,14 +16,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import jax
 import numpy as np
-from crazyflow.control import load_params as load_control_params
-from crazyflow.control.transform import force2pwm
-from crazyflow.dynamics import load_params as load_dynamics_params
 from drone_estimators.ros import ROSConnector
-from drone_racing_msgs.msg import RealClientAction  # type: ignore[import-untyped]
 from gymnasium import Env
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Empty, Int32
+from std_msgs.msg import Empty, Float64MultiArray, Int32
 
 from lsy_drone_racing.envs.real_race_env import EnvData
 from lsy_drone_racing.envs.utils import gate_passed, load_gate_order, load_track
@@ -31,7 +27,6 @@ from lsy_drone_racing.utils.ros import track_poses
 from lsy_drone_racing.utils.ros_race_comm import RaceCommNode
 
 if TYPE_CHECKING:
-    from crazyflow.dynamics import Dynamics
     from ml_collections import ConfigDict
     from numpy.typing import NDArray
 
@@ -63,7 +58,6 @@ class RealMultiDroneRaceEnvClient(Env):
         freq: int,
         track: ConfigDict,
         randomizations: ConfigDict,
-        dynamics: Dynamics,
         sensor_range: float = 0.5,
         control_mode: Literal["state", "attitude"] = "state",
     ):
@@ -76,7 +70,6 @@ class RealMultiDroneRaceEnvClient(Env):
             freq: Control frequency in Hz.
             track: Track configuration (see :func:`~lsy_drone_racing.envs.utils.load_track`).
             randomizations: Randomization configuration (unused on the client side).
-            dynamics: Dynamics model used to load the drone's physical parameters.
             sensor_range: Distance in metres at which gate/obstacle true poses are revealed.
             control_mode: Either ``"state"`` or ``"attitude"``.
         """
@@ -88,12 +81,6 @@ class RealMultiDroneRaceEnvClient(Env):
         self.drone_names = [f"cf{drone['id']}" for drone in drones]
         self.drone_name = self.drone_names[rank]
         self.drone_id = drones[rank]["id"]
-        drone_model = drones[rank]["drone"]
-        self.drone_parameters: dict = load_dynamics_params(dynamics, drone_model)
-        # PWM limits are firmware control parameters, separate from the dynamics parameters.
-        control_params = load_control_params("mellinger", drone_model)["core"]
-        self.drone_parameters.update(pwm_min=control_params["pwm_min"])
-        self.drone_parameters.update(pwm_max=control_params["pwm_max"])
 
         self.gates, self.obstacles, self.drones_track = load_track(track)
         self.n_gates = len(self.gates.pos)
@@ -173,17 +160,20 @@ class RealMultiDroneRaceEnvClient(Env):
         dpos = drone_pos[:, None, :2] - self.obstacles.pos[None, :, :2]
         self.data.obstacles_visited |= np.linalg.norm(dpos, axis=-1) < self.sensor_range
 
-        # Allow for different gate ordering
-        gate_id = self.gate_sequence[self.data.n_gates_passed[self.rank]]
-        gate_reverse = self.gate_sequence_direction[self.data.n_gates_passed[self.rank]] < 0
-        gate_pos = self.gates.pos[gate_id]
-        gate_quat = self.gates.quat[gate_id]
+        # Each drone is checked against its own next gate. Finished drones index the last gate
+        n_track = len(self.gate_sequence)
+        idx = np.minimum(self.data.n_gates_passed, n_track - 1)
+        gate_ids = self.gate_sequence[idx]
+        gate_reverse = self.gate_sequence_direction[idx] < 0
+        gate_pos = self.gates.pos[gate_ids]
+        gate_quat = self.gates.quat[gate_ids]
 
         with jax.default_device(self.device):
             passed = gate_passed(
                 drone_pos, self.data.last_drone_pos, gate_pos, gate_quat, gate_reverse, (0.45, 0.45)
             )
-        self.data.n_gates_passed = self.data.n_gates_passed + np.asarray(passed)
+        passed = np.asarray(passed) & (self.data.n_gates_passed < n_track)  # Finished drones stop
+        self.data.n_gates_passed = self.data.n_gates_passed + passed
         self.data.last_drone_pos[...] = drone_pos
         self.data.taken_off |= drone_pos[self.rank, 2] > 0.1
 
@@ -196,14 +186,6 @@ class RealMultiDroneRaceEnvClient(Env):
         if not within_bound:
             logger.warning("Drone exceeded safety bounds")
             terminated = True
-
-        if self.control_mode == "attitude" and self._ros_connector:
-            pwm = force2pwm(
-                action[3], self.drone_parameters["thrust_max"] * 4, self.drone_parameters["pwm_max"]
-            )
-            pwm = np.clip(pwm, self.drone_parameters["pwm_min"], self.drone_parameters["pwm_max"])
-            command = (*np.rad2deg(action[:3]), int(pwm))
-            self._ros_connector.publish_cmd(command)
 
         self._send_action_update(action)
 
@@ -266,22 +248,17 @@ class RealMultiDroneRaceEnvClient(Env):
         logger.debug("Environment closed")
 
     def _send_action_update(self, action: NDArray):
-        """Publish a :class:`RealClientAction` to the drone worker on the host.
+        """Publish the action to the drone worker on the host.
 
         Args:
             action: Current control action.
         """
-        msg = RealClientAction()
-        msg.action = action.tolist() if isinstance(action, np.ndarray) else list(action)
+        msg = Float64MultiArray(data=np.asarray(action, dtype=np.float64).tolist())
         self._client_action_pub.publish(msg)
 
     def _init_ros_connectors(self):
         """Open the ROS connector for the estimators of all drones."""
-        self._ros_connector = ROSConnector(
-            estimator_names=self.drone_names,
-            cmd_topic=f"/drones/{self.drone_name}/command",
-            timeout=10.0,
-        )
+        self._ros_connector = ROSConnector(estimator_names=self.drone_names, timeout=10.0)
 
     def _init_comm(self):
         """Set up the ROS2 communication node with all publishers and subscribers."""
@@ -303,7 +280,7 @@ class RealMultiDroneRaceEnvClient(Env):
             Empty, "lsy_drone_racing/race_start", race_started, latching_qos
         )
         self._client_action_pub = node.create_publisher(
-            RealClientAction, f"lsy_drone_racing/{self.drone_name}/action", 10
+            Float64MultiArray, f"lsy_drone_racing/{self.drone_name}/action", 10
         )
         self._deregister_pub = node.create_publisher(
             Int32, "lsy_drone_racing/deregister", latching_qos
@@ -316,19 +293,9 @@ class RealMultiDroneRaceEnvClient(Env):
         Returns:
             Tuple of ``(pos, quat, vel, ang_vel)``, each of shape ``(n_drones, ...)``.
         """
-        pos = np.full((self.n_drones, 3), np.nan, dtype=np.float32)
-        quat = np.full((self.n_drones, 4), np.nan, dtype=np.float32)
-        vel = np.full((self.n_drones, 3), np.nan, dtype=np.float32)
-        ang_vel = np.full((self.n_drones, 3), np.nan, dtype=np.float32)
-        for i, name in enumerate(self.drone_names):
-            if i == self.rank:
-                pos[i] = self._ros_connector.est_pos[name]
-                quat[i] = self._ros_connector.est_quat[name]
-                vel[i] = self._ros_connector.est_vel[name]
-                ang_vel[i] = self._ros_connector.est_ang_vel[name]
-            else:
-                pos[i] = self._ros_connector.est_pos.get(name, np.nan)
-                quat[i] = self._ros_connector.est_quat.get(name, np.nan)
-                vel[i] = self._ros_connector.est_vel.get(name, np.nan)
-                ang_vel[i] = self._ros_connector.est_ang_vel.get(name, np.nan)
+        c = self._ros_connector
+        pos, quat, vel, ang_vel = (
+            np.stack([states[name] for name in self.drone_names])
+            for states in (c.est_pos, c.est_quat, c.est_vel, c.est_ang_vel)
+        )
         return pos, quat, vel, ang_vel
